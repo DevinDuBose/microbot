@@ -45,6 +45,8 @@ plugins {
     `maven-publish`
     pmd
     alias(libs.plugins.lombok)
+    alias(libs.plugins.kotlin)
+    alias(libs.plugins.kotlin.lombok)
 
     id("net.runelite.runelite-gradle-plugin.assemble")
     id("net.runelite.runelite-gradle-plugin.index")
@@ -60,6 +62,27 @@ val macEawtJvmArgs = listOf(
     "--add-exports=java.desktop/com.apple.eawt=ALL-UNNAMED",
     "--add-exports=java.desktop/com.apple.eawt.event=ALL-UNNAMED"
 )
+
+kotlin {
+    jvmToolchain(11)
+    sourceSets {
+        main {
+            kotlin.srcDir("src/main/java")
+        }
+        test {
+            kotlin.srcDir("src/test/java")
+        }
+    }
+}
+
+tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compileKotlin") {
+    exclude("**/trent/ardystalls/**")
+    exclude("**/trent/barbassaultplankgatherer/**")
+    exclude("**/trent/barbassaultwoodworker/**")
+    exclude("**/trent/ironsuperheat/**")
+    exclude("**/trent/roguesden/**")
+    exclude("**/trent/wintertodt/**")
+}
 
 tasks.register<JavaExec>("run") {
     group = "application"
@@ -91,6 +114,7 @@ tasks.register<JavaExec>("seedMenuActionInfo") {
         outputFile.parentFile.mkdirs()
     }
 }
+
 
 tasks.register<JavaExec>("runDebug") {
     group = "application"
@@ -364,6 +388,10 @@ dependencies {
     implementation(libs.asm.core)
     implementation(libs.asm.util)
     implementation(libs.asm.commons)
+
+    implementation(libs.kotlin.stdlib.jdk8)
+    implementation(libs.kotlinx.coroutines.core)
+    testImplementation(libs.kotlin.test)
 
     for (platform in listOf(
         "linux",
