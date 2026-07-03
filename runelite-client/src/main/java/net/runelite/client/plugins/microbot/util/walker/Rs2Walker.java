@@ -62,6 +62,7 @@ import net.runelite.client.plugins.microbot.util.walker.door.model.AwaitTicket;
 import net.runelite.client.plugins.microbot.util.walker.door.model.DoorResolution;
 import net.runelite.client.plugins.microbot.util.walker.banking.Rs2WalkerBankingPlanner;
 import net.runelite.client.plugins.microbot.util.walker.awaits.Rs2WalkerRuntimeAwaits;
+import net.runelite.client.plugins.microbot.util.walker.puzzles.DraynorBasementSolver;
 import net.runelite.client.plugins.microbot.util.walker.stall.Rs2WalkerStallPolicy;
 import net.runelite.client.plugins.microbot.util.walker.transport.Rs2WalkerTransportAwaits;
 import net.runelite.client.plugins.microbot.util.walker.lifecycle.Rs2WalkerLifecycleRuntime;
@@ -1053,6 +1054,18 @@ public class Rs2Walker {
      * @param distance
      */
     private static WalkerState processWalk(WorldPoint target, int distance) {
+        // Solve the Draynor basement lever puzzle first if walking to a basement tile, so the
+        // door-transports are unlocked before pathfinding. No-op outside the basement. The
+        // solver's internal walkTo calls clear currentTarget, so restore it before the real walk.
+        if (DraynorBasementSolver.isBasementTarget(target)) {
+            DraynorBasementSolver.solveIfNeeded(target);
+            // The solver's nested walkTo calls clear currentTarget; restore it so the real walk
+            // runs — but not if this walk was interrupted/cancelled while the (blocking) solver
+            // ran (the solver itself never interrupts, so an interrupt here is an external cancel).
+            if (!Thread.currentThread().isInterrupted()) {
+                setTarget(target, "rs2walker:basement-solve-restore");
+            }
+        }
         return processWalk(target, distance, 0);
     }
 
@@ -1644,6 +1657,21 @@ public class Rs2Walker {
                                 recoverTarget = interpolateClickableTarget(path, i, playerLoc,
                                         path.get(i), RECOVERY_MINIMAP_REACH_EUCLIDEAN - 1,
                                         wp -> inInstance || isKnownWalkableOrUnloaded(wp));
+                            }
+                            // Don't let recovery park the player on a tile next to an aggressive NPC
+                            // (e.g. an undead tree). The planner avoids those via avoidDangerousNpcs,
+                            // but this runtime fallback would otherwise strand us in melee. Step the
+                            // target back along the path to the nearest non-hazard tile.
+                            PathfinderConfig dangerCfg = ShortestPathPlugin.pathfinderConfig;
+                            if (dangerCfg != null && dangerCfg.isAvoidDangerousNpcs() && recoverTarget != null
+                                    && dangerCfg.isDangerousAdjacentTile(WorldPointUtil.packWorldPoint(recoverTarget))) {
+                                int safeIdx = recoverIdx;
+                                while (safeIdx > indexOfStartPoint
+                                        && dangerCfg.isDangerousAdjacentTile(WorldPointUtil.packWorldPoint(path.get(safeIdx)))) {
+                                    safeIdx--;
+                                }
+                                recoverIdx = safeIdx;
+                                recoverTarget = path.get(safeIdx);
                             }
                             boolean clicked = recoverTarget != null
                                     && !recoverTarget.equals(playerLoc)
@@ -3736,24 +3764,12 @@ public class Rs2Walker {
                 final String name = comp.getName();
 
                 if (object instanceof WallObject) {
-                    WallObject wallObj = (WallObject) object;
-                    int orientationA = wallObj.getOrientationA();
-                    int orientationB = wallObj.getOrientationB();
-                    boolean pathTouchesBothEnds = probe.distanceTo(fromWp) <= 1 && probe.distanceTo(toWp) <= 1
-                            && fromWp.distanceTo(toWp) >= 1 && fromWp.distanceTo(toWp) <= 2;
-                    boolean orientOk = false;
-                    if (orientationA != 0) {
-                        orientOk = searchNeighborPoint(orientationA, probe, fromWp)
-                                || searchNeighborPoint(orientationA, probe, toWp);
-                    }
-                    if (!orientOk && orientationB != 0) {
-                        orientOk = searchNeighborPoint(orientationB, probe, fromWp)
-                                || searchNeighborPoint(orientationB, probe, toWp);
-                    }
-                    if (!orientOk && pathTouchesBothEnds) {
-                        orientOk = true;
-                    }
-                    if (orientOk) {
+                    // Validate the door's ACTUAL blocked edge against the segment, not the probe
+                    // tile. The probe can sit a tile off the wall (adjacency fallback above), and the
+                    // old probe-orientation check plus the pathTouchesBothEnds shortcut opened doors
+                    // merely beside the path. isDoorOnSegment walks the segment against the wall's
+                    // real edge, matching the GameObject branch and findDoorNearSegment.
+                    if (isDoorOnSegment(object, fromWp, toWp)) {
                         log.info("Found WallObject door - name {} with action {} at {} - from {} to {}", name, action, probe, fromWp, toWp);
                         found = true;
                     } else {
@@ -4447,8 +4463,11 @@ public class Rs2Walker {
         if (wall.getWorldLocation().getPlane() != fromWp.getPlane() || fromWp.getPlane() != toWp.getPlane()) return false;
 
         WorldPoint doorTile = wall.getWorldLocation();
-        WorldPoint blockedNeighbor = getWallDoorNeighborPoint(wall.getOrientationA(), doorTile);
-        if (blockedNeighbor == null) return false;
+        // A door panel can advertise a blocked edge on either orientation; check both so a
+        // legitimately-on-path door is never missed.
+        WorldPoint blockedNeighborA = getWallDoorNeighborPoint(wall.getOrientationA(), doorTile);
+        WorldPoint blockedNeighborB = getWallDoorNeighborPoint(wall.getOrientationB(), doorTile);
+        if (blockedNeighborA == null && blockedNeighborB == null) return false;
 
         int x = fromWp.getX();
         int y = fromWp.getY();
@@ -4461,7 +4480,8 @@ public class Rs2Walker {
             x += Integer.signum(toWp.getX() - x);
             y += Integer.signum(toWp.getY() - y);
             WorldPoint next = new WorldPoint(x, y, fromWp.getPlane());
-            if (isDoorEdgeTransition(previous, next, doorTile, blockedNeighbor)) {
+            if ((blockedNeighborA != null && isDoorEdgeTransition(previous, next, doorTile, blockedNeighborA))
+                    || (blockedNeighborB != null && isDoorEdgeTransition(previous, next, doorTile, blockedNeighborB))) {
                 return true;
             }
             previous = next;
