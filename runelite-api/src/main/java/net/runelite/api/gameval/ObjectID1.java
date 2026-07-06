@@ -19922,672 +19922,672 @@ public class ObjectID1
 	public static final int GH_ROCKSLIDE_06 = 39747;
 
 	/**
-	 * Herbs
+	 * Marrentill
 	 */
 	public static final int HERB_MARRENTILL_1 = 39748;
 
 	/**
-	 * Herbs
+	 * Marrentill
 	 */
 	public static final int HERB_MARRENTILL_2 = 39749;
 
 	/**
-	 * Herbs
+	 * Marrentill
 	 */
 	public static final int HERB_MARRENTILL_3 = 39750;
 
 	/**
-	 * Herbs
+	 * Marrentill
 	 */
 	public static final int HERB_MARRENTILL_FULLYGROWN = 39751;
 
 	/**
-	 * Herbs
+	 * Tarromin
 	 */
 	public static final int HERB_TARROMIN_SEED = 39752;
 
 	/**
-	 * Herbs
+	 * Tarromin
 	 */
 	public static final int HERB_TARROMIN_1 = 39753;
 
 	/**
-	 * Herbs
+	 * Tarromin
 	 */
 	public static final int HERB_TARROMIN_2 = 39754;
 
 	/**
-	 * Herbs
+	 * Tarromin
 	 */
 	public static final int HERB_TARROMIN_3 = 39755;
 
 	/**
-	 * Herbs
+	 * Tarromin
 	 */
 	public static final int HERB_TARROMIN_FULLYGROWN = 39756;
 
 	/**
-	 * Herbs
+	 * Harralander
 	 */
 	public static final int HERB_HARRALANDER_SEED = 39757;
 
 	/**
-	 * Herbs
+	 * Harralander
 	 */
 	public static final int HERB_HARRALANDER_1 = 39758;
 
 	/**
-	 * Herbs
+	 * Harralander
 	 */
 	public static final int HERB_HARRALANDER_2 = 39759;
 
 	/**
-	 * Herbs
+	 * Harralander
 	 */
 	public static final int HERB_HARRALANDER_3 = 39760;
 
 	/**
-	 * Herbs
+	 * Harralander
 	 */
 	public static final int HERB_HARRALANDER_FULLYGROWN = 39761;
 
 	/**
-	 * Herbs
+	 * Ranarr weed
 	 */
 	public static final int HERB_RANARR_WEED_SEED = 39762;
 
 	/**
-	 * Herbs
+	 * Ranarr weed
 	 */
 	public static final int HERB_RANARR_WEED_1 = 39763;
 
 	/**
-	 * Herbs
+	 * Ranarr weed
 	 */
 	public static final int HERB_RANARR_WEED_2 = 39764;
 
 	/**
-	 * Herbs
+	 * Ranarr weed
 	 */
 	public static final int HERB_RANARR_WEED_3 = 39765;
 
 	/**
-	 * Herbs
+	 * Ranarr weed
 	 */
 	public static final int HERB_RANARR_WEED_FULLYGROWN = 39766;
 
 	/**
-	 * Herbs
+	 * Irit leaf
 	 */
 	public static final int HERB_IRIT_LEAF_SEED = 39767;
 
 	/**
-	 * Herbs
+	 * Irit leaf
 	 */
 	public static final int HERB_IRIT_LEAF_1 = 39768;
 
 	/**
-	 * Herbs
+	 * Irit leaf
 	 */
 	public static final int HERB_IRIT_LEAF_2 = 39769;
 
 	/**
-	 * Herbs
+	 * Irit leaf
 	 */
 	public static final int HERB_IRIT_LEAF_3 = 39770;
 
 	/**
-	 * Herbs
+	 * Irit leaf
 	 */
 	public static final int HERB_IRIT_LEAF_FULLYGROWN = 39771;
 
 	/**
-	 * Herbs
+	 * Avantoe
 	 */
 	public static final int HERB_AVANTOE_SEED = 39772;
 
 	/**
-	 * Herbs
+	 * Avantoe
 	 */
 	public static final int HERB_AVANTOE_1 = 39773;
 
 	/**
-	 * Herbs
+	 * Avantoe
 	 */
 	public static final int HERB_AVANTOE_2 = 39774;
 
 	/**
-	 * Herbs
+	 * Avantoe
 	 */
 	public static final int HERB_AVANTOE_3 = 39775;
 
 	/**
-	 * Herbs
+	 * Avantoe
 	 */
 	public static final int HERB_AVANTOE_FULLYGROWN = 39776;
 
 	/**
-	 * Herbs
+	 * Toadflax
 	 */
 	public static final int HERB_TOADFLAX_SEED = 39777;
 
 	/**
-	 * Herbs
+	 * Toadflax
 	 */
 	public static final int HERB_TOADFLAX_1 = 39778;
 
 	/**
-	 * Herbs
+	 * Toadflax
 	 */
 	public static final int HERB_TOADFLAX_2 = 39779;
 
 	/**
-	 * Herbs
+	 * Toadflax
 	 */
 	public static final int HERB_TOADFLAX_3 = 39780;
 
 	/**
-	 * Herbs
+	 * Toadflax
 	 */
 	public static final int HERB_TOADFLAX_FULLYGROWN = 39781;
 
 	/**
-	 * Herbs
+	 * Kwuarm
 	 */
 	public static final int HERB_KWUARM_SEED = 39782;
 
 	/**
-	 * Herbs
+	 * Kwuarm
 	 */
 	public static final int HERB_KWUARM_1 = 39783;
 
 	/**
-	 * Herbs
+	 * Kwuarm
 	 */
 	public static final int HERB_KWUARM_2 = 39784;
 
 	/**
-	 * Herbs
+	 * Kwuarm
 	 */
 	public static final int HERB_KWUARM_3 = 39785;
 
 	/**
-	 * Herbs
+	 * Kwuarm
 	 */
 	public static final int HERB_KWUARM_FULLYGROWN = 39786;
 
 	/**
-	 * Herbs
+	 * Cadantine
 	 */
 	public static final int HERB_CADANTINE_SEED = 39787;
 
 	/**
-	 * Herbs
+	 * Cadantine
 	 */
 	public static final int HERB_CADANTINE_1 = 39788;
 
 	/**
-	 * Herbs
+	 * Cadantine
 	 */
 	public static final int HERB_CADANTINE_2 = 39789;
 
 	/**
-	 * Herbs
+	 * Cadantine
 	 */
 	public static final int HERB_CADANTINE_3 = 39790;
 
 	/**
-	 * Herbs
+	 * Cadantine
 	 */
 	public static final int HERB_CADANTINE_FULLYGROWN = 39791;
 
 	/**
-	 * Herbs
+	 * Lantadyme
 	 */
 	public static final int HERB_LANTADYME_SEED = 39792;
 
 	/**
-	 * Herbs
+	 * Lantadyme
 	 */
 	public static final int HERB_LANTADYME_1 = 39793;
 
 	/**
-	 * Herbs
+	 * Lantadyme
 	 */
 	public static final int HERB_LANTADYME_2 = 39794;
 
 	/**
-	 * Herbs
+	 * Lantadyme
 	 */
 	public static final int HERB_LANTADYME_3 = 39795;
 
 	/**
-	 * Herbs
+	 * Lantadyme
 	 */
 	public static final int HERB_LANTADYME_FULLYGROWN = 39796;
 
 	/**
-	 * Herbs
+	 * Dwarf weed
 	 */
 	public static final int HERB_DWARF_WEED_SEED = 39797;
 
 	/**
-	 * Herbs
+	 * Dwarf weed
 	 */
 	public static final int HERB_DWARF_WEED_1 = 39798;
 
 	/**
-	 * Herbs
+	 * Dwarf weed
 	 */
 	public static final int HERB_DWARF_WEED_2 = 39799;
 
 	/**
-	 * Herbs
+	 * Dwarf weed
 	 */
 	public static final int HERB_DWARF_WEED_3 = 39800;
 
 	/**
-	 * Herbs
+	 * Dwarf weed
 	 */
 	public static final int HERB_DWARF_WEED_FULLYGROWN = 39801;
 
 	/**
-	 * Herbs
+	 * Torstol
 	 */
 	public static final int HERB_TORSTOL_SEED = 39802;
 
 	/**
-	 * Herbs
+	 * Torstol
 	 */
 	public static final int HERB_TORSTOL_1 = 39803;
 
 	/**
-	 * Herbs
+	 * Torstol
 	 */
 	public static final int HERB_TORSTOL_2 = 39804;
 
 	/**
-	 * Herbs
+	 * Torstol
 	 */
 	public static final int HERB_TORSTOL_3 = 39805;
 
 	/**
-	 * Herbs
+	 * Torstol
 	 */
 	public static final int HERB_TORSTOL_FULLYGROWN = 39806;
 
 	/**
-	 * Herbs
+	 * Snapdragon
 	 */
 	public static final int HERB_SNAPDRAGON_SEED = 39807;
 
 	/**
-	 * Herbs
+	 * Snapdragon
 	 */
 	public static final int HERB_SNAPDRAGON_1 = 39808;
 
 	/**
-	 * Herbs
+	 * Snapdragon
 	 */
 	public static final int HERB_SNAPDRAGON_2 = 39809;
 
 	/**
-	 * Herbs
+	 * Snapdragon
 	 */
 	public static final int HERB_SNAPDRAGON_3 = 39810;
 
 	/**
-	 * Herbs
+	 * Snapdragon
 	 */
 	public static final int HERB_SNAPDRAGON_FULLYGROWN = 39811;
 
 	/**
-	 * Herb patch
+	 * Guam leaf
 	 */
 	public static final int MYARM_REALPATCH_HERB1_GUAM_LEAF_ACTIVE = 39812;
 
 	/**
-	 * Herb patch
+	 * Guam leaf
 	 */
 	public static final int MYARM_REALPATCH_HERB2_GUAM_LEAF_ACTIVE = 39813;
 
 	/**
-	 * Herbs
+	 * Guam leaf
 	 */
 	public static final int MYARM_REALPATCH_HERB3_GUAM_LEAF_ACTIVE = 39814;
 
 	/**
-	 * Herbs
+	 * Guam leaf
 	 */
 	public static final int MYARM_REALPATCH_HERB4_GUAM_LEAF_ACTIVE = 39815;
 
 	/**
-	 * Herbs
+	 * Guam leaf
 	 */
 	public static final int MYARM_REALPATCH_HERB5_GUAM_LEAF_ACTIVE = 39816;
 
 	/**
-	 * Herb patch
+	 * Marrentill
 	 */
 	public static final int MYARM_REALPATCH_HERB1_MARRENTILL_ACTIVE = 39817;
 
 	/**
-	 * Herb patch
+	 * Marrentill
 	 */
 	public static final int MYARM_REALPATCH_HERB2_MARRENTILL_ACTIVE = 39818;
 
 	/**
-	 * Herbs
+	 * Marrentill
 	 */
 	public static final int MYARM_REALPATCH_HERB3_MARRENTILL_ACTIVE = 39819;
 
 	/**
-	 * Herbs
+	 * Marrentill
 	 */
 	public static final int MYARM_REALPATCH_HERB4_MARRENTILL_ACTIVE = 39820;
 
 	/**
-	 * Herbs
+	 * Marrentill
 	 */
 	public static final int MYARM_REALPATCH_HERB5_MARRENTILL_ACTIVE = 39821;
 
 	/**
-	 * Herb patch
+	 * Tarromin
 	 */
 	public static final int MYARM_REALPATCH_HERB1_TARROMIN_ACTIVE = 39822;
 
 	/**
-	 * Herb patch
+	 * Tarromin
 	 */
 	public static final int MYARM_REALPATCH_HERB2_TARROMIN_ACTIVE = 39823;
 
 	/**
-	 * Herbs
+	 * Tarromin
 	 */
 	public static final int MYARM_REALPATCH_HERB3_TARROMIN_ACTIVE = 39824;
 
 	/**
-	 * Herbs
+	 * Tarromin
 	 */
 	public static final int MYARM_REALPATCH_HERB4_TARROMIN_ACTIVE = 39825;
 
 	/**
-	 * Herbs
+	 * Tarromin
 	 */
 	public static final int MYARM_REALPATCH_HERB5_TARROMIN_ACTIVE = 39826;
 
 	/**
-	 * Herb patch
+	 * Harralander
 	 */
 	public static final int MYARM_REALPATCH_HERB1_HARRALANDER_ACTIVE = 39827;
 
 	/**
-	 * Herb patch
+	 * Harralander
 	 */
 	public static final int MYARM_REALPATCH_HERB2_HARRALANDER_ACTIVE = 39828;
 
 	/**
-	 * Herbs
+	 * Harralander
 	 */
 	public static final int MYARM_REALPATCH_HERB3_HARRALANDER_ACTIVE = 39829;
 
 	/**
-	 * Herbs
+	 * Harralander
 	 */
 	public static final int MYARM_REALPATCH_HERB4_HARRALANDER_ACTIVE = 39830;
 
 	/**
-	 * Herbs
+	 * Harralander
 	 */
 	public static final int MYARM_REALPATCH_HERB5_HARRALANDER_ACTIVE = 39831;
 
 	/**
-	 * Herb patch
+	 * Ranarr weed
 	 */
 	public static final int MYARM_REALPATCH_HERB1_RANARR_WEED_ACTIVE = 39832;
 
 	/**
-	 * Herb patch
+	 * Ranarr weed
 	 */
 	public static final int MYARM_REALPATCH_HERB2_RANARR_WEED_ACTIVE = 39833;
 
 	/**
-	 * Herbs
+	 * Ranarr weed
 	 */
 	public static final int MYARM_REALPATCH_HERB3_RANARR_WEED_ACTIVE = 39834;
 
 	/**
-	 * Herbs
+	 * Ranarr weed
 	 */
 	public static final int MYARM_REALPATCH_HERB4_RANARR_WEED_ACTIVE = 39835;
 
 	/**
-	 * Herbs
+	 * Ranarr weed
 	 */
 	public static final int MYARM_REALPATCH_HERB5_RANARR_WEED_ACTIVE = 39836;
 
 	/**
-	 * Herb patch
+	 * Irit leaf
 	 */
 	public static final int MYARM_REALPATCH_HERB1_IRIT_LEAF_ACTIVE = 39837;
 
 	/**
-	 * Herb patch
+	 * Irit leaf
 	 */
 	public static final int MYARM_REALPATCH_HERB2_IRIT_LEAF_ACTIVE = 39838;
 
 	/**
-	 * Herbs
+	 * Irit leaf
 	 */
 	public static final int MYARM_REALPATCH_HERB3_IRIT_LEAF_ACTIVE = 39839;
 
 	/**
-	 * Herbs
+	 * Irit leaf
 	 */
 	public static final int MYARM_REALPATCH_HERB4_IRIT_LEAF_ACTIVE = 39840;
 
 	/**
-	 * Herbs
+	 * Irit leaf
 	 */
 	public static final int MYARM_REALPATCH_HERB5_IRIT_LEAF_ACTIVE = 39841;
 
 	/**
-	 * Herb patch
+	 * Avantoe
 	 */
 	public static final int MYARM_REALPATCH_HERB1_AVANTOE_ACTIVE = 39842;
 
 	/**
-	 * Herb patch
+	 * Avantoe
 	 */
 	public static final int MYARM_REALPATCH_HERB2_AVANTOE_ACTIVE = 39843;
 
 	/**
-	 * Herbs
+	 * Avantoe
 	 */
 	public static final int MYARM_REALPATCH_HERB3_AVANTOE_ACTIVE = 39844;
 
 	/**
-	 * Herbs
+	 * Avantoe
 	 */
 	public static final int MYARM_REALPATCH_HERB4_AVANTOE_ACTIVE = 39845;
 
 	/**
-	 * Herbs
+	 * Avantoe
 	 */
 	public static final int MYARM_REALPATCH_HERB5_AVANTOE_ACTIVE = 39846;
 
 	/**
-	 * Herb patch
+	 * Toadflax
 	 */
 	public static final int MYARM_REALPATCH_HERB1_TOADFLAX_ACTIVE = 39847;
 
 	/**
-	 * Herb patch
+	 * Toadflax
 	 */
 	public static final int MYARM_REALPATCH_HERB2_TOADFLAX_ACTIVE = 39848;
 
 	/**
-	 * Herbs
+	 * Toadflax
 	 */
 	public static final int MYARM_REALPATCH_HERB3_TOADFLAX_ACTIVE = 39849;
 
 	/**
-	 * Herbs
+	 * Toadflax
 	 */
 	public static final int MYARM_REALPATCH_HERB4_TOADFLAX_ACTIVE = 39850;
 
 	/**
-	 * Herbs
+	 * Toadflax
 	 */
 	public static final int MYARM_REALPATCH_HERB5_TOADFLAX_ACTIVE = 39851;
 
 	/**
-	 * Herb patch
+	 * Kwuarm
 	 */
 	public static final int MYARM_REALPATCH_HERB1_KWUARM_ACTIVE = 39852;
 
 	/**
-	 * Herb patch
+	 * Kwuarm
 	 */
 	public static final int MYARM_REALPATCH_HERB2_KWUARM_ACTIVE = 39853;
 
 	/**
-	 * Herbs
+	 * Kwuarm
 	 */
 	public static final int MYARM_REALPATCH_HERB3_KWUARM_ACTIVE = 39854;
 
 	/**
-	 * Herbs
+	 * Kwuarm
 	 */
 	public static final int MYARM_REALPATCH_HERB4_KWUARM_ACTIVE = 39855;
 
 	/**
-	 * Herbs
+	 * Kwuarm
 	 */
 	public static final int MYARM_REALPATCH_HERB5_KWUARM_ACTIVE = 39856;
 
 	/**
-	 * Herb patch
+	 * Cadantine
 	 */
 	public static final int MYARM_REALPATCH_HERB1_CADANTINE_ACTIVE = 39857;
 
 	/**
-	 * Herb patch
+	 * Cadantine
 	 */
 	public static final int MYARM_REALPATCH_HERB2_CADANTINE_ACTIVE = 39858;
 
 	/**
-	 * Herbs
+	 * Cadantine
 	 */
 	public static final int MYARM_REALPATCH_HERB3_CADANTINE_ACTIVE = 39859;
 
 	/**
-	 * Herbs
+	 * Cadantine
 	 */
 	public static final int MYARM_REALPATCH_HERB4_CADANTINE_ACTIVE = 39860;
 
 	/**
-	 * Herbs
+	 * Cadantine
 	 */
 	public static final int MYARM_REALPATCH_HERB5_CADANTINE_ACTIVE = 39861;
 
 	/**
-	 * Herb patch
+	 * Lantadyme
 	 */
 	public static final int MYARM_REALPATCH_HERB1_LANTADYME_ACTIVE = 39862;
 
 	/**
-	 * Herb patch
+	 * Lantadyme
 	 */
 	public static final int MYARM_REALPATCH_HERB2_LANTADYME_ACTIVE = 39863;
 
 	/**
-	 * Herbs
+	 * Lantadyme
 	 */
 	public static final int MYARM_REALPATCH_HERB3_LANTADYME_ACTIVE = 39864;
 
 	/**
-	 * Herbs
+	 * Lantadyme
 	 */
 	public static final int MYARM_REALPATCH_HERB4_LANTADYME_ACTIVE = 39865;
 
 	/**
-	 * Herbs
+	 * Lantadyme
 	 */
 	public static final int MYARM_REALPATCH_HERB5_LANTADYME_ACTIVE = 39866;
 
 	/**
-	 * Herb patch
+	 * Dwarf weed
 	 */
 	public static final int MYARM_REALPATCH_HERB1_DWARF_WEED_ACTIVE = 39867;
 
 	/**
-	 * Herb patch
+	 * Dwarf weed
 	 */
 	public static final int MYARM_REALPATCH_HERB2_DWARF_WEED_ACTIVE = 39868;
 
 	/**
-	 * Herbs
+	 * Dwarf weed
 	 */
 	public static final int MYARM_REALPATCH_HERB3_DWARF_WEED_ACTIVE = 39869;
 
 	/**
-	 * Herbs
+	 * Dwarf weed
 	 */
 	public static final int MYARM_REALPATCH_HERB4_DWARF_WEED_ACTIVE = 39870;
 
 	/**
-	 * Herbs
+	 * Dwarf weed
 	 */
 	public static final int MYARM_REALPATCH_HERB5_DWARF_WEED_ACTIVE = 39871;
 
 	/**
-	 * Herb patch
+	 * Torstol
 	 */
 	public static final int MYARM_REALPATCH_HERB1_TORSTOL_ACTIVE = 39872;
 
 	/**
-	 * Herb patch
+	 * Torstol
 	 */
 	public static final int MYARM_REALPATCH_HERB2_TORSTOL_ACTIVE = 39873;
 
 	/**
-	 * Herbs
+	 * Torstol
 	 */
 	public static final int MYARM_REALPATCH_HERB3_TORSTOL_ACTIVE = 39874;
 
 	/**
-	 * Herbs
+	 * Torstol
 	 */
 	public static final int MYARM_REALPATCH_HERB4_TORSTOL_ACTIVE = 39875;
 
 	/**
-	 * Herbs
+	 * Torstol
 	 */
 	public static final int MYARM_REALPATCH_HERB5_TORSTOL_ACTIVE = 39876;
 
 	/**
-	 * Herb patch
+	 * Snapdragon
 	 */
 	public static final int MYARM_REALPATCH_HERB1_SNAPDRAGON_ACTIVE = 39877;
 
 	/**
-	 * Herb patch
+	 * Snapdragon
 	 */
 	public static final int MYARM_REALPATCH_HERB2_SNAPDRAGON_ACTIVE = 39878;
 
 	/**
-	 * Herbs
+	 * Snapdragon
 	 */
 	public static final int MYARM_REALPATCH_HERB3_SNAPDRAGON_ACTIVE = 39879;
 
 	/**
-	 * Herbs
+	 * Snapdragon
 	 */
 	public static final int MYARM_REALPATCH_HERB4_SNAPDRAGON_ACTIVE = 39880;
 
 	/**
-	 * Herbs
+	 * Snapdragon
 	 */
 	public static final int MYARM_REALPATCH_HERB5_SNAPDRAGON_ACTIVE = 39881;
 
@@ -60892,52 +60892,52 @@ public class ObjectID1
 	public static final int FARMING_HOPS_PATCH_5 = 55341;
 
 	/**
-	 * Herb patch
+	 * Huasca
 	 */
 	public static final int MYARM_REALPATCH_HERB1_HUASCA_ACTIVE = 55342;
 
 	/**
-	 * Herb patch
+	 * Huasca
 	 */
 	public static final int MYARM_REALPATCH_HERB2_HUASCA_ACTIVE = 55343;
 
 	/**
-	 * Herbs
+	 * Huasca
 	 */
 	public static final int MYARM_REALPATCH_HERB3_HUASCA_ACTIVE = 55344;
 
 	/**
-	 * Herbs
+	 * Huasca
 	 */
 	public static final int MYARM_REALPATCH_HERB4_HUASCA_ACTIVE = 55345;
 
 	/**
-	 * Herbs
+	 * Huasca
 	 */
 	public static final int MYARM_REALPATCH_HERB5_HUASCA_ACTIVE = 55346;
 
 	/**
-	 * Herbs
+	 * Huasca
 	 */
 	public static final int HERB_HUASCA_SEED = 55347;
 
 	/**
-	 * Herbs
+	 * Huasca
 	 */
 	public static final int HERB_HUASCA_1 = 55348;
 
 	/**
-	 * Herbs
+	 * Huasca
 	 */
 	public static final int HERB_HUASCA_2 = 55349;
 
 	/**
-	 * Herbs
+	 * Huasca
 	 */
 	public static final int HERB_HUASCA_3 = 55350;
 
 	/**
-	 * Herbs
+	 * Huasca
 	 */
 	public static final int HERB_HUASCA_FULLYGROWN = 55351;
 
