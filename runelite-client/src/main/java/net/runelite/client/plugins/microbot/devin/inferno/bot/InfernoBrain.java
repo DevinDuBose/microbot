@@ -124,6 +124,9 @@ public final class InfernoBrain {
      * stand on the pillar they stay clumped (0 = never wait).
      */
     static final int CLUMP_WAIT = tunableInt("CLUMP_WAIT", 8);
+    /** 1 = when styles collide, protect against the style with the most max-hit damage landing. */
+    static final int PRAY_BY_DAMAGE = tunableInt("PRAY_BY_DAMAGE", 0);
+    private final Map<Prayer, Integer> damageByPrayer = new java.util.EnumMap<>(Prayer.class);
     /** Kill priority of the blob: after mager and ranger, before the meleer (-1 = the helper table, after the meleer). Sim, 12 runs of waves 1-66: 57.3 avg waves vs 53.1. */
     static final int BLOB_KILL_PRIORITY = tunableInt("BLOB_KILL_PRIORITY", 25);
     /** Kill priority override for the magic split, which resists barrage (-1 = table). */
@@ -1117,12 +1120,27 @@ public final class InfernoBrain {
                 wanted = p;
                 wantedPriority = prio;
             }
+            if (attackTick == nextTick) {
+                damageByPrayer.merge(p, MaxHits.of(t.type, p == Prayer.PROTECT_MELEE), Integer::sum);
+            }
             if (attackTick < soonest || (attackTick == soonest && prio > soonestPriority)) {
                 soonest = attackTick;
                 soonestPrayer = p;
                 soonestPriority = prio;
             }
         }
+        if (PRAY_BY_DAMAGE == 1 && damageByPrayer.size() > 1) {
+            // Several styles land together: block the one with the most damage at stake (two
+            // rangers outweigh one mager); ties keep the higher-priority monster's prayer.
+            int most = damageByPrayer.getOrDefault(wanted, 0);
+            for (Map.Entry<Prayer, Integer> e : damageByPrayer.entrySet()) {
+                if (e.getValue() > most) {
+                    most = e.getValue();
+                    wanted = e.getKey();
+                }
+            }
+        }
+        damageByPrayer.clear();
         if (wanted == null && FLICK_PROTECTION == 0) {
             wanted = soonestPrayer;
         }
