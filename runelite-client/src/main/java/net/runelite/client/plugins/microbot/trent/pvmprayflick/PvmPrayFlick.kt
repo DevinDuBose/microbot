@@ -144,10 +144,10 @@ interface PvmPrayFlickConfig : Config {
 
 @PluginDescriptor(
     name = PluginDescriptor.Trent + "PVM Prayer Flicker",
-    description = "Reactive prayer flicker for GWD + Jad variants + Hunllef (damage-tick-correct scheduling)",
+    description = "Reactive prayer flicker for GWD + Jad variants + Hunllef + Inferno waves (damage-tick-correct scheduling)",
     tags = [
         "combat", "prayer", "flicker", "gwd", "godwars", "inferno", "jad", "flick",
-        "ket-rak", "gauntlet", "hunllef", "corrupted",
+        "ket-rak", "gauntlet", "hunllef", "corrupted", "zuk",
     ],
     enabledByDefault = false,
 )
@@ -348,6 +348,7 @@ class PvmPrayFlick : Plugin() {
                 prayer = prayer,
                 fireAtTick = fireAtTick,
                 animationTick = nowTick,
+                priority = config.priority,
             )
         }
 
@@ -435,6 +436,12 @@ class PvmPrayFlick : Plugin() {
             return
         }
 
+        // Inferno NPCs fire at each other (and Zuk's healers at the shield);
+        // only projectiles headed for us matter. Positional projectiles
+        // (null target) are kept — Hunllef's are untargeted.
+        val target = projectile.targetActor
+        if (target != null && target != client.localPlayer) return
+
         val nowTick = client.tickCount
         val projKey = System.identityHashCode(projectile)
         val firstSighting = script.markProjectileSeen(projKey, nowTick)
@@ -485,10 +492,11 @@ class PvmPrayFlick : Plugin() {
         }
         script.schedulePendingToggle(
             npcIndex = syntheticKey,
-            npcName = "hunllef-projectile-$projId",
+            npcName = "${matched.nameKeyword}-projectile-$projId",
             prayer = prayer,
             fireAtTick = fireAtTick,
             animationTick = nowTick,
+            priority = matched.priority,
         )
 
         if (debug) {
@@ -551,6 +559,11 @@ class PvmPrayFlick : Plugin() {
  * player would eat the next mage/range hit unprotected. Other bosses leave
  * this `false` — their style only changes when an attack animation plays, and
  * the prayer is never knocked off mid-stance.
+ *
+ * [priority] breaks ties when attacks from several NPCs land on the same tick
+ * (only one protection prayer can be up). Higher wins. Only meaningful in
+ * multi-attacker fights — the Inferno ordering follows the standard
+ * Jad > Mager > Ranger > Blob > Meleer > Bat damage ranking.
  */
 private data class BossConfig(
     val npcIds: Set<Int>,
@@ -560,6 +573,7 @@ private data class BossConfig(
     val attacks: Map<Int, Rs2PrayerEnum>,
     val projectiles: Map<Int, Rs2PrayerEnum> = emptyMap(),
     val maintainPrayer: Boolean = false,
+    val priority: Int = 0,
 )
 
 /**
@@ -689,6 +703,7 @@ private val BOSSES: List<BossConfig> = listOf(
         nameKeyword = "jad",
         attackDelayTicks = 3,
         cooldownTicks = 7,
+        priority = 100,
         attacks = mapOf(
             // JalTok-Jad (Inferno + Ket-Rak).
             AnimationID.JALTOKJAD_ATTACK_MAGIC to Rs2PrayerEnum.PROTECT_MAGIC,
@@ -762,6 +777,98 @@ private val BOSSES: List<BossConfig> = listOf(
         // in scene" detection. Other bosses keep this `false`.
         maintainPrayer = true,
     ),
+
+    // ---- Inferno waves (Jal-Nib nibblers only attack pillars, so omitted) ----
+    //
+    // Ranged/magic attacks are flicked from their projectiles (the projectile
+    // path computes the damage tick from remainingCycles), so those configs
+    // carry no ranged/magic animations. Melee damage lands on the animation
+    // tick, so melee anims use attackDelayTicks = 0 and share the GWD
+    // "first hit lands with the previous prayer" limitation — in practice
+    // melee is avoided by positioning. Zuk's own attack is typeless (blocked
+    // by the shield, not prayer), so Zuk has no entry; his Jad and final-wave
+    // ranger/mager spawns are covered by their configs.
+    //
+    // Blob splits come before the blob so the "jal-ak" name fallback can't
+    // claim a Jal-AkRek-* NPC.
+
+    // Jal-Zek (mager). Melees when adjacent.
+    BossConfig(
+        npcIds = setOf(NpcID.INFERNO_CREATURE_MAGER, NpcID.INFERNO_MAGER_FINALWAVE),
+        nameKeyword = "jal-zek",
+        attackDelayTicks = 0,
+        cooldownTicks = 2,
+        attacks = mapOf(AnimationID.JALAKXIL_ATTACK_MELEE to Rs2PrayerEnum.PROTECT_MELEE),
+        projectiles = mapOf(SpotanimID.INFERNO_ZEK_PROJECTILE to Rs2PrayerEnum.PROTECT_MAGIC),
+        priority = 90,
+    ),
+
+    // Jal-Xil (ranger). Melees when adjacent.
+    BossConfig(
+        npcIds = setOf(NpcID.INFERNO_CREATURE_RANGER, NpcID.INFERNO_RANGER_FINALWAVE),
+        nameKeyword = "jal-xil",
+        attackDelayTicks = 0,
+        cooldownTicks = 2,
+        attacks = mapOf(AnimationID.JALXIL_ATTACK_MELEE to Rs2PrayerEnum.PROTECT_MELEE),
+        projectiles = mapOf(SpotanimID.INFERNO_XIL_PROJECTILE to Rs2PrayerEnum.PROTECT_RANGE),
+        priority = 80,
+    ),
+
+    // Jal-AkRek-Mej / -Xil / -Ket (blob splits).
+    BossConfig(
+        npcIds = setOf(
+            NpcID.INFERNO_CREATURE_SPLITTER_MAGE,
+            NpcID.INFERNO_CREATURE_SPLITTER_RANGE,
+            NpcID.INFERNO_CREATURE_SPLITTER_MELEE,
+        ),
+        nameKeyword = "jal-akrek",
+        attackDelayTicks = 0,
+        cooldownTicks = 2,
+        attacks = emptyMap(),
+        projectiles = mapOf(
+            SpotanimID.INFERNO_BABYSPLITTER_MAGE to Rs2PrayerEnum.PROTECT_MAGIC,
+            SpotanimID.INFERNO_BABYSPLITTER_MAGE_BIG to Rs2PrayerEnum.PROTECT_MAGIC,
+            SpotanimID.INFERNO_BABYSPLITTER_MAGE_BIGGEST to Rs2PrayerEnum.PROTECT_MAGIC,
+            SpotanimID.INFERNO_BABYSPLITTER_RANGE to Rs2PrayerEnum.PROTECT_RANGE,
+        ),
+        priority = 65,
+    ),
+
+    // Jal-Ak (blob). Reads the active prayer and attacks with a style it
+    // isn't protecting against — the projectile reveals which one.
+    BossConfig(
+        npcIds = setOf(NpcID.INFERNO_CREATURE_SPLITTER),
+        nameKeyword = "jal-ak",
+        attackDelayTicks = 0,
+        cooldownTicks = 2,
+        attacks = mapOf(AnimationID.JALAK_ATTACK_MELEE to Rs2PrayerEnum.PROTECT_MELEE),
+        projectiles = mapOf(
+            SpotanimID.INFERNO_SPLITTER_MAGE to Rs2PrayerEnum.PROTECT_MAGIC,
+            SpotanimID.INFERNO_SPLITTER_RANGE to Rs2PrayerEnum.PROTECT_RANGE,
+        ),
+        priority = 70,
+    ),
+
+    // Jal-ImKot (meleer).
+    BossConfig(
+        npcIds = setOf(NpcID.INFERNO_CREATURE_MELEE, NpcID.INFERNO_CREATURE_MELEE_SMALL),
+        nameKeyword = "jal-imkot",
+        attackDelayTicks = 0,
+        cooldownTicks = 2,
+        attacks = mapOf(AnimationID.JALIMKOT_ATTACK to Rs2PrayerEnum.PROTECT_MELEE),
+        priority = 60,
+    ),
+
+    // Jal-MejRah (bat).
+    BossConfig(
+        npcIds = setOf(NpcID.INFERNO_CREATURE_HARPIE),
+        nameKeyword = "jal-mejrah",
+        attackDelayTicks = 0,
+        cooldownTicks = 2,
+        attacks = emptyMap(),
+        projectiles = mapOf(SpotanimID.INFERNO_HARPIE_PROJ to Rs2PrayerEnum.PROTECT_RANGE),
+        priority = 50,
+    ),
 )
 
 /**
@@ -777,6 +884,7 @@ private data class PendingToggle(
     val prayer: Rs2PrayerEnum,
     val fireAtTick: Int,
     val animationTick: Int,
+    val priority: Int = 0,
 )
 
 /**
@@ -1110,6 +1218,7 @@ private class PvmPrayFlickScript : Script() {
         prayer: Rs2PrayerEnum,
         fireAtTick: Int,
         animationTick: Int,
+        priority: Int = 0,
     ) {
         pendingToggles[npcIndex] = PendingToggle(
             npcIndex = npcIndex,
@@ -1117,6 +1226,7 @@ private class PvmPrayFlickScript : Script() {
             prayer = prayer,
             fireAtTick = fireAtTick,
             animationTick = animationTick,
+            priority = priority,
         )
         attackCooldowns[npcIndex] = animationTick
     }
@@ -1184,8 +1294,29 @@ private class PvmPrayFlickScript : Script() {
         // same poll, firing them in one burst would saturate the menu queue
         // and re-trigger the freeze. Anything beyond the cap stays queued
         // for the next poll — naturally rate-limits recovery.
+        // Same-tick collisions (Inferno: several monsters' hits landing on one
+        // tick) can only be answered with one protection prayer. Keep the
+        // highest-priority toggle per fireAtTick and drop the rest, otherwise
+        // drain order — not threat — decides which prayer ends up on.
         val ready = pendingToggles.values
             .filter { it.fireAtTick <= nowTick }
+            .groupBy { it.fireAtTick }
+            .values
+            .map { sameTick ->
+                val winner = sameTick.maxByOrNull { it.priority }!!
+                for (loser in sameTick) {
+                    if (loser === winner) continue
+                    pendingToggles.remove(loser.npcIndex)
+                    if (debugLogging) {
+                        Microbot.log(
+                            "[PvmPrayFlick] collision tick=${loser.fireAtTick}: dropped ${loser.prayer} " +
+                                "(${loser.npcName}, prio=${loser.priority}) for ${winner.prayer} " +
+                                "(${winner.npcName}, prio=${winner.priority})"
+                        )
+                    }
+                }
+                winner
+            }
             .sortedBy { it.fireAtTick }
 
         var firedThisPoll = 0
