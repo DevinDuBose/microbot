@@ -178,6 +178,8 @@ public final class InfernoBrain {
         int lastY;
         boolean moved = true;
         int firstSeenTick = -1;
+        /** Consecutive ticks without moving (a nibbler standing still off a pillar is frozen). */
+        int stillTicks;
 
         Tracker(int index, InfernoNpcType type) {
             this.index = index;
@@ -360,6 +362,7 @@ public final class InfernoBrain {
                 t.firstSeenTick = o.tick;
             }
             t.moved = t.lastX != n.x || t.lastY != n.y;
+            t.stillTicks = t.moved ? 0 : t.stillTicks + 1;
             t.lastX = n.x;
             t.lastY = n.y;
             if (n.animation >= 0) {
@@ -488,6 +491,14 @@ public final class InfernoBrain {
                 return engage;
             }
         }
+        if (NIBBLER_INTERCEPT == 1) {
+            WorldPoint intercept = interceptTile(o, grid, occ, me);
+            if (intercept != null) {
+                committedTile = intercept;
+                committedUntil = o.tick + 1;
+                return intercept;
+            }
+        }
         double currentScore = tileScore(o, grid, occ, me, me, focus);
         WorldPoint best = me;
         double bestScore = currentScore;
@@ -519,6 +530,85 @@ public final class InfernoBrain {
             committedUntil = o.tick + COMMIT_TICKS;
         }
         return chosen;
+    }
+
+    /**
+     * 1 = while pillars stand, a nibbler that threatens one (walking to it or attacking it)
+     * and that we cannot hit from here sends us to the nearest tile we can hit it from.
+     * Pillar HP is a run-long resource: every tick a nibbler spends on a pillar is lost for
+     * good (pillars are not restored between waves; OSRS Wiki).
+     */
+    static final int NIBBLER_INTERCEPT = tunableInt("NIBBLER_INTERCEPT", 1);
+    /** Ticks of walking worth one point of expected damage taken when choosing that tile. */
+    static final double INTERCEPT_DAMAGE_WEIGHT = tunable("INTERCEPT_DAMAGE_WEIGHT", 1.0);
+    static final int INTERCEPT_RADIUS = 12;
+
+    private WorldPoint interceptTile(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me) {
+        if (o.pillars.isEmpty()) {
+            return null;
+        }
+        List<Npc> threats = new ArrayList<>();
+        for (Npc n : o.npcs) {
+            if (InfernoNpcType.forNpcId(n.id) != InfernoNpcType.NIBBLER || expectedDead(n, o)) {
+                continue;
+            }
+            Tracker t = trackers.get(n.index);
+            boolean frozenAway = t != null && t.stillTicks >= 2 && !besidePillar(o, n);
+            if (frozenAway) {
+                continue;
+            }
+            if (canHit(grid, o, me, n) || canBarrage(grid, o, me, n)) {
+                return null; // already in reach: targeting handles it
+            }
+            threats.add(n);
+        }
+        if (threats.isEmpty()) {
+            return null;
+        }
+        WorldPoint best = null;
+        double bestCost = Double.MAX_VALUE;
+        for (int dx = -INTERCEPT_RADIUS; dx <= INTERCEPT_RADIUS; dx++) {
+            for (int dy = -INTERCEPT_RADIUS; dy <= INTERCEPT_RADIUS; dy++) {
+                WorldPoint t = me.dx(dx).dy(dy);
+                if (!grid.isStandable(t)) {
+                    continue;
+                }
+                int sx = t.getX() - GRID_BASE_X;
+                int sy = t.getY() - GRID_BASE_Y;
+                if (sx < 0 || sy < 0 || sx >= occ.length || sy >= occ[0].length || occ[sx][sy]) {
+                    continue;
+                }
+                boolean reaches = false;
+                for (Npc n : threats) {
+                    if (canHit(grid, o, t, n)) {
+                        reaches = true;
+                        break;
+                    }
+                }
+                if (!reaches) {
+                    continue;
+                }
+                double ticks = Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / 2.0);
+                double cost = ticks;
+                if (ticks < bestCost) { // damage only matters among tiles that could still win
+                    cost += INTERCEPT_DAMAGE_WEIGHT * rolloutDamagePerTick(o, grid, occ, t) * ROLLOUT_TICKS;
+                }
+                if (cost < bestCost) {
+                    bestCost = cost;
+                    best = t;
+                }
+            }
+        }
+        return best;
+    }
+
+    private static boolean besidePillar(InfernoObservation o, Npc n) {
+        for (InfernoObservation.Pillar p : o.pillars) {
+            if (new WorldArea(p.x, p.y, PILLAR_SIZE, PILLAR_SIZE, 0).isInMeleeDistance(new WorldPoint(n.x, n.y, 0))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** One monster that can attack a candidate tile. */
