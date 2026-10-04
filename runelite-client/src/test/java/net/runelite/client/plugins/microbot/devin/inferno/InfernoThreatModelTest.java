@@ -22,10 +22,10 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 /**
- * Positioning logic against synthetic arenas. Line of sight and collision
- * go through {@link InfernoGrid}, which InfernoGridTest proves identical to
- * RuneLite's own code. Expected values are derived by hand from the game
- * rules noted on each test.
+ * Positioning logic against synthetic arenas. NPC stepping, line of sight and
+ * attack range follow RS Mod's rules ({@link RsModPathing}, see RsModPathingTest)
+ * over the {@link InfernoGrid} collision snapshot. Expected values are derived by
+ * hand from the rules noted on each test.
  */
 public class InfernoThreatModelTest {
 
@@ -139,7 +139,7 @@ public class InfernoThreatModelTest {
         assertEquals(7, map.size());
     }
 
-    // ---- NPC stepping (port of RuneLite calculateNextTravellingPoint) ----
+    // ---- NPC stepping (RS Mod StepFactory.validated toward RouteFinding.naiveDestination) ----
 
     @Test
     public void stepsDiagonallyWhenClear() {

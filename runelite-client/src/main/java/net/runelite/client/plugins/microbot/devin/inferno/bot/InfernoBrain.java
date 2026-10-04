@@ -1667,7 +1667,7 @@ public final class InfernoBrain {
                         seen = 99;
                         break;
                     }
-                    if (grid.hasLineOfSight(t, a)) {
+                    if (InfernoThreatModel.npcLineOfSight(grid, a, t)) {
                         seen++;
                     }
                     adjacent |= a.distanceTo(t) <= 1;

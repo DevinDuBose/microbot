@@ -84,6 +84,41 @@ public final class InfernoGrid {
         return p.getPlane() == plane && inScene(sx, sy) && (flags[sx][sy] & CollisionDataFlag.BLOCK_MOVEMENT_FULL) == 0;
     }
 
+    // ---------------------------------------------------------------- RS Mod collision view
+
+    /** RS Mod's custom entity bits; never taken from the client's map (see {@link RsModPathing}). */
+    private static final int RSMOD_ENTITY_BITS = RsModPathing.BLOCK_NPCS | RsModPathing.BLOCK_PLAYERS;
+
+    /**
+     * Collision flags of world tile (x, y) for {@link RsModPathing}: the client flags (same bit
+     * layout as RS Mod) without RS Mod's custom entity bits, or -1 outside the snapshot (RS Mod's
+     * value for an unallocated zone).
+     */
+    public int rsmodFlag(int worldX, int worldY) {
+        int sx = worldX - baseX;
+        int sy = worldY - baseY;
+        if (!inScene(sx, sy)) {
+            return -1;
+        }
+        return flags[sx][sy] & ~RSMOD_ENTITY_BITS;
+    }
+
+    /** {@link #rsmodFlag} with BLOCK_NPCS on scene tiles {@code free} reports as held by another NPC. */
+    public RsModPathing.CollisionMap rsmodMap(TileFilter free) {
+        if (free == null || free == ALL_FREE) {
+            return this::rsmodFlag;
+        }
+        return (x, y) -> {
+            int sx = x - baseX;
+            int sy = y - baseY;
+            if (!inScene(sx, sy)) {
+                return -1;
+            }
+            int f = flags[sx][sy] & ~RSMOD_ENTITY_BITS;
+            return free.free(sx, sy) ? f : f | RsModPathing.BLOCK_NPCS;
+        };
+    }
+
     // ---------------------------------------------------------------- line of sight
 
     /**

@@ -17,11 +17,14 @@ import java.util.Set;
  * {@link InfernoGrid} collision snapshot, so it runs off the client thread
  * and can be unit-tested against synthetic arenas.
  *
- * Line of sight is a verified port of RuneLite's
- * {@code WorldArea.hasLineOfSightTo}, run from the candidate tile to the
- * monster's area (the same direction the xKylee plugin uses). Pillars are
- * solid line-of-sight-blocking objects (verified in the game cache), so they
- * reach it through the collision map.
+ * NPC stepping, line of sight and attack range follow RS Mod's server rules
+ * ({@link RsModPathing}): one validated step per tick toward
+ * {@code RouteFinding.naiveDestination} around the target (diagonal, else x, else y; other
+ * NPCs block), melee needs RS Mod's op range (edges touching, so no diagonals) and every other
+ * attack needs the ap range (rectangle gap on both axes within range, not overlapping) plus line
+ * of sight cast from the target to the NPC's closest tile. Pillars are solid
+ * line-of-sight-blocking objects (verified in the game cache), so they reach it through the
+ * collision map. {@link #RSMOD_RULES} = false restores the previous RuneLite-derived rules.
  */
 public final class InfernoThreatModel {
 
@@ -30,6 +33,13 @@ public final class InfernoThreatModel {
     public static final int THREAT_MAGIC = 4;
     /** Blob and Jad pick a style per attack. */
     public static final int THREAT_UNKNOWN = 8;
+
+    /**
+     * true: RS Mod's NPC rules ({@link RsModPathing}). false: the previous model (RuneLite
+     * {@code WorldArea} line of sight from the target to any visible edge tile, and the port of
+     * RuneLite's removed {@code calculateNextTravellingPoint}). Kept for comparison runs.
+     */
+    public static boolean RSMOD_RULES = true;
 
     /** Steps simulated when predicting a monster walking into attack position (xKylee uses 30). */
     static final int MAX_PREDICTED_STEPS = 30;
@@ -61,8 +71,44 @@ public final class InfernoThreatModel {
         }
     }
 
-    /** Whether a monster standing on {@code area} can attack a player on {@code target}. */
+    /**
+     * Whether a monster standing on {@code area} can attack a player on {@code target}. RS Mod
+     * (NpcInteractionProcessor): melee uses the op range ({@link RsModPathing#isWithinOpRange}:
+     * cardinally touching, not diagonal, not under), everything else the ap range with the NPC's
+     * attack range ({@link RsModPathing#isWithinApRange}: not under, gap within range on both
+     * axes, reverse line of sight).
+     */
     public static boolean canAttack(InfernoGrid grid, InfernoNpcType type, WorldArea area, WorldPoint target) {
+        if (!RSMOD_RULES) {
+            return legacyCanAttack(grid, type, area, target);
+        }
+        if (target.getPlane() != area.getPlane() || target.getPlane() != grid.plane) {
+            return false;
+        }
+        if (type.isMeleeOnly()) {
+            return RsModPathing.isWithinOpRange(grid::rsmodFlag, area.getX(), area.getY(), area.getWidth(),
+                    target.getX(), target.getY(), 1);
+        }
+        return RsModPathing.isWithinApRange(grid::rsmodFlag, area.getX(), area.getY(), area.getWidth(),
+                target.getX(), target.getY(), 1, type.getRange());
+    }
+
+    /**
+     * NPC line of sight toward a player on {@code target} (RS Mod: cast from the target's tile to
+     * the NPC's closest tile, BLOCK_PLAYERS as extra flag). No range check.
+     */
+    public static boolean npcLineOfSight(InfernoGrid grid, WorldArea area, WorldPoint target) {
+        if (!RSMOD_RULES) {
+            return grid.hasLineOfSight(target, area);
+        }
+        if (target.getPlane() != area.getPlane() || target.getPlane() != grid.plane) {
+            return false;
+        }
+        return RsModPathing.hasLineOfSight(grid::rsmodFlag, target.getX(), target.getY(), area.getX(), area.getY(),
+                1, 1, area.getWidth(), area.getHeight(), RsModPathing.BLOCK_PLAYERS);
+    }
+
+    private static boolean legacyCanAttack(InfernoGrid grid, InfernoNpcType type, WorldArea area, WorldPoint target) {
         if (type.isMeleeOnly()) {
             // Melee needs cardinal adjacency; diagonal does not count.
             return area.isInMeleeDistance(target);
@@ -112,7 +158,47 @@ public final class InfernoThreatModel {
     }
 
     /**
-     * One step of the standard NPC travelling pattern toward {@code target}:
+     * One tick of RS Mod NPC movement toward {@code target} (NpcMovementProcessor + StepFactory):
+     * the destination is {@code RouteFinding.naiveDestination} around the target; when the NPC
+     * is not on it, it takes {@code StepFactory.validated} (diagonal, else x, else y; tiles that
+     * {@code free} reports as held by another NPC carry BLOCK_NPCS and block the step).
+     *
+     * <p>An NPC overlapping its target does not path at all: RS Mod steps it one tile in a random
+     * cardinal direction, or leaves it in place when the target player is busy interacting
+     * ("Red-X"). That is unpredictable here: null when {@code stopAtMeleeDistance}, else
+     * {@code from}. {@code stopAtMeleeDistance} has no other effect under RS Mod rules: NPCs stop
+     * because they can attack, which callers check before stepping.
+     *
+     * @return the next area, the same instance when it does not move, or null (see above)
+     */
+    public static WorldArea nextStep(InfernoGrid grid, WorldArea from, WorldArea target, boolean stopAtMeleeDistance,
+                              InfernoGrid.TileFilter free) {
+        if (!RSMOD_RULES) {
+            return legacyNextStep(grid, from, target, stopAtMeleeDistance, free);
+        }
+        if (from.getPlane() != target.getPlane()) {
+            return null;
+        }
+        int size = from.getWidth();
+        if (RsModPathing.collides(from.getX(), from.getY(), target.getX(), target.getY(),
+                size, from.getHeight(), target.getWidth(), target.getHeight())) {
+            return stopAtMeleeDistance ? null : from;
+        }
+        int[] dest = RsModPathing.naiveDestination(from.getX(), from.getY(), size, from.getHeight(),
+                target.getX(), target.getY(), target.getWidth(), target.getHeight());
+        if (dest[0] == from.getX() && dest[1] == from.getY()) {
+            return from;
+        }
+        int[] step = RsModPathing.validated(grid.rsmodMap(free), from.getX(), from.getY(), dest[0], dest[1],
+                size, RsModPathing.BLOCK_NPCS);
+        if (step == null) {
+            return from;
+        }
+        return new WorldArea(step[0], step[1], from.getWidth(), from.getHeight(), from.getPlane());
+    }
+
+    /**
+     * Previous model: one step of the standard NPC travelling pattern toward {@code target}:
      * align the south-west corner (OSRS Wiki: monsters "attempt to align their
      * south-west corner with you"), diagonal first, then x, then y.
      *
@@ -126,7 +212,7 @@ public final class InfernoThreatModel {
      * @return the next area, the same area when stuck, or null when the
      * outcome is unpredictable (overlapping the target, leaving the scene)
      */
-    public static WorldArea nextStep(InfernoGrid grid, WorldArea from, WorldArea target, boolean stopAtMeleeDistance,
+    static WorldArea legacyNextStep(InfernoGrid grid, WorldArea from, WorldArea target, boolean stopAtMeleeDistance,
                               InfernoGrid.TileFilter free) {
         if (from.getPlane() != target.getPlane()) {
             return null;
