@@ -110,11 +110,13 @@ public final class InfernoBrain {
      */
     static final double MELEER_ADJACENT_COST = tunable("MELEER_ADJACENT_COST", 3.0);
     /**
-     * 1 = protection prayers are checked when a projectile lands (the evidence: Jal-Ak guidance,
-     * the live-tuned Jad flicker), so ranged/magic hits are protected on their impact tick from
-     * observed projectiles; 0 = checked when the monster attacks.
+     * 0 (default) = protection prayers are checked when the monster launches its attack, which
+     * is how the game works for Inferno monsters (OSRS Wiki: switching before the blob's
+     * projectile is launched blocks it; the alternating 1-tick flick depends on it; Jad's check
+     * happens when his projectile spawns after the wind-up). 1 = checked on impact, kept only
+     * as a simulator robustness mode.
      */
-    static final int IMPACT_PRAYER = tunableInt("IMPACT_PRAYER", 1);
+    static final int IMPACT_PRAYER = tunableInt("IMPACT_PRAYER", 0);
     /** 1 = offensive prayer only on our attack ticks; 0 = keep it on. */
     static final int FLICK_OFFENSIVE = tunableInt("FLICK_OFFENSIVE", 1);
     /** Assumed share of a monster's max hit dealt per attack (hit chance x average roll). */

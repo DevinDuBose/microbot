@@ -781,95 +781,90 @@ private val BOSSES: List<BossConfig> = listOf(
 
     // ---- Inferno waves (Jal-Nib nibblers only attack pillars, so omitted) ----
     //
-    // Ranged/magic attacks are flicked from their projectiles (the projectile
-    // path computes the damage tick from remainingCycles), so those configs
-    // carry no ranged/magic animations. Melee damage lands on the animation
-    // tick, so melee anims use attackDelayTicks = 0 and share the GWD
-    // "first hit lands with the previous prayer" limitation — in practice
-    // melee is avoided by positioning. Zuk's own attack is typeless (blocked
-    // by the shield, not prayer), so Zuk has no entry; his Jad and final-wave
-    // ranger/mager spawns are covered by their configs.
+    // Inferno monsters' protection is checked when the attack is LAUNCHED (the
+    // attack animation), not when the projectile lands: switching mid-flight
+    // neither saves nor costs a hit (OSRS Wiki: switching before the blob's
+    // projectile is launched blocks it; the alternating 1-tick flick relies on
+    // it). A reactive toggle therefore can't catch the attack it sees, so these
+    // entries time the NEXT attack of a monster that just attacked: each
+    // repeats on a fixed cycle (4 ticks; bat 3). With attackDelayTicks =
+    // speed - 1 the toggle is applied on the next attack tick. The first attack
+    // of each monster still lands with the previous prayer (same limitation as
+    // GWD above).
     //
-    // Blob splits come before the blob so the "jal-ak" name fallback can't
-    // claim a Jal-AkRek-* NPC.
+    // Jal-Ak (the big blob) has no entry: it reads the protection prayer 3
+    // ticks before attacking and uses the other style, which needs planning
+    // (show it one style on its read tick, protect the opposite on its attack
+    // tick), not a reactive flick. Zuk's attack is typeless (shield only).
+    //
+    // Blob splits share the blob's attack animations (same skeleton in the game
+    // cache), so each split type gets its own entry to know its style; they come
+    // before any "jal-ak" name match.
 
-    // Jal-Zek (mager). Melees when adjacent.
+    // Jal-Zek (mager): magic, or melee when adjacent. 4-tick cycle.
     BossConfig(
         npcIds = setOf(NpcID.INFERNO_CREATURE_MAGER, NpcID.INFERNO_MAGER_FINALWAVE),
         nameKeyword = "jal-zek",
-        attackDelayTicks = 0,
+        attackDelayTicks = 3,
         cooldownTicks = 2,
-        attacks = mapOf(AnimationID.JALAKXIL_ATTACK_MELEE to Rs2PrayerEnum.PROTECT_MELEE),
-        projectiles = mapOf(SpotanimID.INFERNO_ZEK_PROJECTILE to Rs2PrayerEnum.PROTECT_MAGIC),
+        attacks = mapOf(
+            AnimationID.JALAKXIL_ATTACK_MAGIC to Rs2PrayerEnum.PROTECT_MAGIC,
+            AnimationID.JALAKXIL_ATTACK_MELEE to Rs2PrayerEnum.PROTECT_MELEE,
+        ),
         priority = 90,
     ),
 
-    // Jal-Xil (ranger). Melees when adjacent.
+    // Jal-Xil (ranger): ranged, or melee when adjacent. 4-tick cycle.
     BossConfig(
         npcIds = setOf(NpcID.INFERNO_CREATURE_RANGER, NpcID.INFERNO_RANGER_FINALWAVE),
         nameKeyword = "jal-xil",
-        attackDelayTicks = 0,
+        attackDelayTicks = 3,
         cooldownTicks = 2,
-        attacks = mapOf(AnimationID.JALXIL_ATTACK_MELEE to Rs2PrayerEnum.PROTECT_MELEE),
-        projectiles = mapOf(SpotanimID.INFERNO_XIL_PROJECTILE to Rs2PrayerEnum.PROTECT_RANGE),
+        attacks = mapOf(
+            AnimationID.JALXIL_ATTACK_RANGED to Rs2PrayerEnum.PROTECT_RANGE,
+            AnimationID.JALXIL_ATTACK_MELEE to Rs2PrayerEnum.PROTECT_MELEE,
+        ),
         priority = 80,
     ),
 
-    // Jal-AkRek-Mej / -Xil / -Ket (blob splits). Below the blob in priority.
-    BossConfig(
-        npcIds = setOf(
-            NpcID.INFERNO_CREATURE_SPLITTER_MAGE,
-            NpcID.INFERNO_CREATURE_SPLITTER_RANGE,
-            NpcID.INFERNO_CREATURE_SPLITTER_MELEE,
-        ),
-        nameKeyword = "jal-akrek",
-        attackDelayTicks = 0,
-        cooldownTicks = 2,
-        attacks = emptyMap(),
-        projectiles = mapOf(
-            SpotanimID.INFERNO_BABYSPLITTER_MAGE to Rs2PrayerEnum.PROTECT_MAGIC,
-            SpotanimID.INFERNO_BABYSPLITTER_MAGE_BIG to Rs2PrayerEnum.PROTECT_MAGIC,
-            SpotanimID.INFERNO_BABYSPLITTER_MAGE_BIGGEST to Rs2PrayerEnum.PROTECT_MAGIC,
-            SpotanimID.INFERNO_BABYSPLITTER_RANGE to Rs2PrayerEnum.PROTECT_RANGE,
-        ),
-        priority = 55,
-    ),
-
-    // Jal-Ak (blob). Reads the active prayer and attacks with a style it
-    // isn't protecting against — the projectile reveals which one.
-    BossConfig(
-        npcIds = setOf(NpcID.INFERNO_CREATURE_SPLITTER),
-        nameKeyword = "jal-ak",
-        attackDelayTicks = 0,
-        cooldownTicks = 2,
-        attacks = mapOf(AnimationID.JALAK_ATTACK_MELEE to Rs2PrayerEnum.PROTECT_MELEE),
-        projectiles = mapOf(
-            SpotanimID.INFERNO_SPLITTER_MAGE to Rs2PrayerEnum.PROTECT_MAGIC,
-            SpotanimID.INFERNO_SPLITTER_RANGE to Rs2PrayerEnum.PROTECT_RANGE,
-        ),
-        priority = 60,
-    ),
-
-    // Jal-ImKot (meleer).
+    // Jal-ImKot (meleer). 4-tick cycle.
     BossConfig(
         npcIds = setOf(NpcID.INFERNO_CREATURE_MELEE),
         nameKeyword = "jal-imkot",
-        attackDelayTicks = 0,
+        attackDelayTicks = 3,
         cooldownTicks = 2,
         attacks = mapOf(AnimationID.JALIMKOT_ATTACK to Rs2PrayerEnum.PROTECT_MELEE),
         priority = 70,
     ),
 
-    // Jal-MejRah (bat).
+    // Jal-AkRek-Mej / -Xil / -Ket (blob splits): fixed style each, 4-tick cycle.
+    splitConfig(NpcID.INFERNO_CREATURE_SPLITTER_MAGE, "jal-akrek-mej", Rs2PrayerEnum.PROTECT_MAGIC),
+    splitConfig(NpcID.INFERNO_CREATURE_SPLITTER_RANGE, "jal-akrek-xil", Rs2PrayerEnum.PROTECT_RANGE),
+    splitConfig(NpcID.INFERNO_CREATURE_SPLITTER_MELEE, "jal-akrek-ket", Rs2PrayerEnum.PROTECT_MELEE),
+
+    // Jal-MejRah (bat): ranged, 3-tick cycle.
     BossConfig(
         npcIds = setOf(NpcID.INFERNO_CREATURE_HARPIE),
         nameKeyword = "jal-mejrah",
-        attackDelayTicks = 0,
+        attackDelayTicks = 2,
         cooldownTicks = 2,
-        attacks = emptyMap(),
-        projectiles = mapOf(SpotanimID.INFERNO_HARPIE_PROJ to Rs2PrayerEnum.PROTECT_RANGE),
+        attacks = mapOf(AnimationID.JALMEJRAH_ATTACK to Rs2PrayerEnum.PROTECT_RANGE),
         priority = 50,
     ),
+)
+
+/** A blob split: the blob's attack animations, one fixed style, 4-tick cycle. */
+private fun splitConfig(npcId: Int, keyword: String, prayer: Rs2PrayerEnum) = BossConfig(
+    npcIds = setOf(npcId),
+    nameKeyword = keyword,
+    attackDelayTicks = 3,
+    cooldownTicks = 2,
+    attacks = mapOf(
+        AnimationID.JALAK_ATTACK_MAGIC to prayer,
+        AnimationID.JALAK_ATTACK_MELEE to prayer,
+        AnimationID.JALAK_ATTACK_RANGED to prayer,
+    ),
+    priority = 55,
 )
 
 /**
