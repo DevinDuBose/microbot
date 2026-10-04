@@ -213,6 +213,8 @@ public final class InfernoBrain {
         lastCooldown = 0;
         committedTile = null;
         committedUntil = -1;
+        lastDodgeTick = -100;
+        dodgeStreak = 0;
     }
 
     public List<String> decide(InfernoObservation o) {
@@ -244,6 +246,12 @@ public final class InfernoBrain {
 
         // Positioning first: prayer and target are evaluated for where we will stand.
         WorldPoint stand = choosePosition(o, grid, me);
+        if (DODGE == 1) {
+            WorldPoint d = dodge(o, grid, occupied(grid, o), me, stand);
+            if (d != null) {
+                stand = d;
+            }
+        }
         if (!stand.equals(me)) {
             actions.add("MOVE " + stand.getX() + " " + stand.getY());
             movingTicks++;
@@ -652,6 +660,18 @@ public final class InfernoBrain {
      * movement exactly as in the threat model, so trapping monsters is valued automatically.
      */
     private double rolloutDamagePerTick(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint t) {
+        WorldPoint[] plan = new WorldPoint[ROLLOUT_TICKS];
+        java.util.Arrays.fill(plan, t);
+        return rolloutDamage(o, grid, occ, t, plan) / ROLLOUT_TICKS;
+    }
+
+    /**
+     * Expected unprotected damage over a movement plan: {@code plan[s - 1]} is our tile at the
+     * end of tick {@code o.tick + s}, starting from {@code start}. Monsters take their turn
+     * before us each tick (OSRS Wiki, Hit delay), so on each tick they move toward, and attack,
+     * the tile we ended the previous tick on.
+     */
+    private double rolloutDamage(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint start, WorldPoint[] plan) {
         List<Sim> sims = new ArrayList<>();
         for (Npc n : o.npcs) {
             InfernoNpcType type = InfernoNpcType.forNpcId(n.id);
@@ -665,9 +685,13 @@ public final class InfernoBrain {
         if (sims.isEmpty()) {
             return 0;
         }
-        WorldArea target = new WorldArea(t, 1, 1);
         double total = 0;
-        for (int step = 1; step <= ROLLOUT_TICKS; step++) {
+        WorldPoint t = start;
+        for (int step = 1; step <= plan.length; step++) {
+            if (step > 1) {
+                t = plan[step - 2];
+            }
+            WorldArea target = new WorldArea(t, 1, 1);
             int tick = o.tick + step;
             double[] byStyle = new double[4];
             double unprotectable = 0;
@@ -702,7 +726,78 @@ public final class InfernoBrain {
             }
             total += sum - max + unprotectable;
         }
-        return total / ROLLOUT_TICKS;
+        return total;
+    }
+
+    // ------------------------------------------------------------------ dodging
+
+    /** 1 = step aside for a tick or two when that avoids attacks landing together. */
+    static final int DODGE = tunableInt("DODGE", 0);
+    /** Expected damage a dodge must save over just following the chosen path. */
+    static final double DODGE_MARGIN = tunable("DODGE_MARGIN", 3.0);
+    /** Look-ahead length for comparing dodges, in ticks. */
+    static final int DODGE_HORIZON = tunableInt("DODGE_HORIZON", 8);
+
+    /**
+     * Tile to step to instead of heading for {@code chosen}, or null. A dodge is a tile we
+     * reach this tick, held for one or two ticks, after which we walk on to {@code chosen}.
+     * Stepping out of one monster's sight for a tick delays its attack, which pulls apart two
+     * monsters that attack on the same tick (only one of which prayer can cover).
+     */
+    private WorldPoint dodge(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me, WorldPoint chosen) {
+        // Dodging costs attacks: only for an imminent collision, and never for long in a row.
+        if (o.tick - lastDodgeTick == 1 ? dodgeStreak >= DODGE_MAX_STREAK : o.tick - lastDodgeTick <= DODGE_COOLDOWN) {
+            return null;
+        }
+        WorldPoint[] basePlan = walkPlan(grid, me, null, 0, chosen);
+        if (rolloutDamage(o, grid, occ, me, java.util.Arrays.copyOf(basePlan, 3)) <= DODGE_MARGIN) {
+            return null;
+        }
+        double baseline = rolloutDamage(o, grid, occ, me, basePlan);
+        WorldPoint best = null;
+        double bestDamage = baseline - DODGE_MARGIN;
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dy = -2; dy <= 2; dy++) {
+                WorldPoint h = me.dx(dx).dy(dy);
+                if (h.equals(chosen) && !h.equals(me)) {
+                    continue; // that is the baseline
+                }
+                int sx = h.getX() - GRID_BASE_X;
+                int sy = h.getY() - GRID_BASE_Y;
+                if (!grid.isStandable(h) || occ[sx][sy] || !stepToward(grid, me, h, 2).equals(h)) {
+                    continue;
+                }
+                for (int hold = 1; hold <= 2; hold++) {
+                    double d = rolloutDamage(o, grid, occ, me, walkPlan(grid, me, h, hold, chosen));
+                    if (d < bestDamage) {
+                        bestDamage = d;
+                        best = h;
+                    }
+                }
+            }
+        }
+        if (best != null) {
+            dodgeStreak = o.tick - lastDodgeTick == 1 ? dodgeStreak + 1 : 1;
+            lastDodgeTick = o.tick;
+        }
+        return best;
+    }
+
+    /** Most consecutive ticks spent dodging, then {@link #DODGE_COOLDOWN} ticks without. */
+    static final int DODGE_MAX_STREAK = tunableInt("DODGE_MAX_STREAK", 2);
+    static final int DODGE_COOLDOWN = tunableInt("DODGE_COOLDOWN", 4);
+    private int lastDodgeTick = -100;
+    private int dodgeStreak;
+
+    /** Our tiles over {@link #DODGE_HORIZON} ticks: {@code hold} ticks on {@code via}, then on to {@code dest}. */
+    private static WorldPoint[] walkPlan(InfernoGrid grid, WorldPoint me, WorldPoint via, int hold, WorldPoint dest) {
+        WorldPoint[] plan = new WorldPoint[DODGE_HORIZON];
+        WorldPoint cur = me;
+        for (int s = 0; s < plan.length; s++) {
+            cur = via != null && s < hold ? via : stepToward(grid, cur, dest, 2);
+            plan[s] = cur;
+        }
+        return plan;
     }
 
     /**
