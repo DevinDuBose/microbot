@@ -90,6 +90,12 @@ public final class InfernoBrainServer {
                 case "PROJ":
                     o.projectiles.add(new InfernoObservation.Projectile(i(f[1]), i(f[2]), i(f[3])));
                     break;
+                case "LOSQ": {
+                    // Diagnostics: LOSQ npcX npcY size playerX playerY -> "LOS 1|0" using the brain's
+                    // grid (arena + preceding PILLAR lines) and the NPC threat line of sight.
+                    InfernoGridProbe.answer(o, f, out);
+                    break;
+                }
                 case "STANDBY": {
                     // Pillars from the preceding PILLAR lines; reply with the standby tile.
                     net.runelite.api.coords.WorldPoint t = InfernoBrain.standbyTile(o);

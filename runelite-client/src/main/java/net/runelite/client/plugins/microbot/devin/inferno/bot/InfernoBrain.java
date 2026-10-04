@@ -110,6 +110,19 @@ public final class InfernoBrain {
      */
     static final double MELEER_ADJACENT_COST = tunable("MELEER_ADJACENT_COST", 3.0);
     /**
+     * 1 = while a blob can see us, alternate Protect from Magic / Missiles every tick (the
+     * community "alternate flick"). The blob reads our prayer and fires 3 ticks later, an odd
+     * gap, so it always fires the style we are then protecting, with no timing knowledge needed.
+     * The phase is chosen so known mager/ranger attacks land on their own prayer; a melee hit
+     * due next tick overrides the pattern. 2 = alternate only while no mager is a threat
+     * (alternation cannot keep Magic up on a mager's shifting attack ticks).
+     */
+    static final int BLOB_ALTERNATE = tunableInt("BLOB_ALTERNATE", 0);
+    /** 1 = score tiles by a short look-ahead simulation of monster movement and attacks. */
+    static final int ROLLOUT = tunableInt("ROLLOUT", 1);
+    /** Look-ahead length in ticks. */
+    static final int ROLLOUT_TICKS = tunableInt("ROLLOUT_TICKS", 6);
+    /**
      * 0 (default) = protection prayers are checked when the monster launches its attack, which
      * is how the game works for Inferno monsters (OSRS Wiki: switching before the blob's
      * projectile is launched blocks it; the alternating 1-tick flick depends on it; Jad's check
@@ -139,6 +152,8 @@ public final class InfernoBrain {
         boolean couldAttackLastTick;
         /** Meleer underground: no threat until it resurfaces. */
         boolean burrowed;
+        /** Last tick a blob could see/attack us: a read prayer is fired even after we hide. */
+        int lastInViewTick = -100;
 
         Tracker(int index, InfernoNpcType type) {
             this.index = index;
@@ -282,7 +297,7 @@ public final class InfernoBrain {
             }
             boolean canAttack = InfernoThreatModel.canAttack(grid, t.type, area(n), me);
             boolean cycleRunning = t.nextAttackTick > o.tick;
-            if (canAttack && !t.couldAttackLastTick && !cycleRunning) {
+            if (canAttack && !t.couldAttackLastTick && (!cycleRunning || BLOB_RESCAN_ON_REGAIN == 1)) {
                 t.nextAttackTick = o.tick + BLOB_SCAN_LEAD;
             }
             t.couldAttackLastTick = canAttack;
@@ -483,6 +498,9 @@ public final class InfernoBrain {
             unprotected += a.dps * worst;
         }
         // Low HP makes every point of damage more costly.
+        if (ROLLOUT == 1) {
+            unprotected = rolloutDamagePerTick(o, grid, occ, t);
+        }
         double hpFactor = o.maxHp > 0 && o.hp < o.maxHp / 2 ? 2.0 : 1.0;
         double score = unprotected * hpFactor;
 
@@ -511,6 +529,85 @@ public final class InfernoBrain {
         }
         score += MOVE_COST * Math.max(Math.abs(t.getX() - me.getX()), Math.abs(t.getY() - me.getY()));
         return score;
+    }
+
+    /** A monster during a look-ahead: where it stands and when it can next attack. */
+    private static final class Sim {
+        final InfernoNpcType type;
+        WorldArea area;
+        int next;
+        final int[] own;
+
+        Sim(InfernoNpcType type, WorldArea area, int next) {
+            this.type = type;
+            this.area = area;
+            this.next = next;
+            this.own = new int[]{area.getX() - GRID_BASE_X, area.getY() - GRID_BASE_Y,
+                    area.getX() - GRID_BASE_X + area.getWidth() - 1, area.getY() - GRID_BASE_Y + area.getHeight() - 1};
+        }
+    }
+
+    /**
+     * Expected unprotected damage per tick if we stand on {@code t} for the next
+     * {@link #ROLLOUT_TICKS} ticks. Each tick every monster either attacks (it can see/reach us
+     * and its timer is ready; then its timer restarts) or takes one standard NPC step toward
+     * us. Prayer blocks the most damaging style landing on a tick (attacks resolve at launch);
+     * the rest is taken. Adjacent rangers/magers/blobs may melee, half of which no prayer
+     * covers. Unknown timers are assumed ready (cautious). Pillars and other NPCs block
+     * movement exactly as in the threat model, so trapping monsters is valued automatically.
+     */
+    private double rolloutDamagePerTick(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint t) {
+        List<Sim> sims = new ArrayList<>();
+        for (Npc n : o.npcs) {
+            InfernoNpcType type = InfernoNpcType.forNpcId(n.id);
+            Tracker tr = trackers.get(n.index);
+            if (type == null || !type.isThreat() || type.getProtectPriority() == 0 || (tr != null && tr.burrowed)) {
+                continue;
+            }
+            int next = tr == null || tr.nextAttackTick < 0 ? o.tick + 1 : Math.max(tr.nextAttackTick, o.tick + 1);
+            sims.add(new Sim(type, area(n), next));
+        }
+        if (sims.isEmpty()) {
+            return 0;
+        }
+        WorldArea target = new WorldArea(t, 1, 1);
+        double total = 0;
+        for (int step = 1; step <= ROLLOUT_TICKS; step++) {
+            int tick = o.tick + step;
+            double[] byStyle = new double[4];
+            double unprotectable = 0;
+            for (Sim m : sims) {
+                if (InfernoThreatModel.canAttack(grid, m.type, m.area, t)) {
+                    if (tick >= m.next) {
+                        m.next = tick + attackSpeed(m.type, o.wave);
+                        double hit = EXPECTED_HIT_FRACTION * MaxHits.of(m.type, false);
+                        if (!m.type.isMeleeOnly() && m.area.isInMeleeDistance(t)) {
+                            double melee = EXPECTED_HIT_FRACTION * MaxHits.of(m.type, true);
+                            unprotectable += 0.5 * Math.min(hit, melee);
+                            hit = 0.5 * Math.max(hit, melee);
+                        }
+                        // The blob's style follows what we show it; count it as Ranged (steered).
+                        Style st = m.type.getDefaultStyle() == Style.UNKNOWN ? Style.RANGE : m.type.getDefaultStyle();
+                        byStyle[st.ordinal()] += hit;
+                    }
+                    continue;
+                }
+                final int[] own = m.own;
+                InfernoGrid.TileFilter free = (x, y) -> (x >= own[0] && x <= own[2] && y >= own[1] && y <= own[3]) || !occ[x][y];
+                WorldArea nextArea = InfernoThreatModel.nextStep(grid, m.area, target, true, free);
+                if (nextArea != null) {
+                    m.area = nextArea;
+                }
+            }
+            double sum = 0;
+            double max = 0;
+            for (double v : byStyle) {
+                sum += v;
+                max = Math.max(max, v);
+            }
+            total += sum - max + unprotectable;
+        }
+        return total / ROLLOUT_TICKS;
     }
 
     /**
@@ -716,6 +813,10 @@ public final class InfernoBrain {
         if (wanted == null && FLICK_PROTECTION == 0) {
             wanted = soonestPrayer;
         }
+        boolean alternate = BLOB_ALTERNATE == 1 || (BLOB_ALTERNATE == 2 && !magerThreat(o, grid, stand, occ));
+        if (alternate && blobInView(o, grid, stand, occ) && wanted != Prayer.PROTECT_MELEE) {
+            wanted = alternatingPrayer(o, grid, stand, occ, nextTick);
+        }
         if (wanted == null && blobReadsNextTick(o, grid, stand, occ, nextTick)) {
             // A blob reads our protection on this tick and attacks with the other style 3 ticks
             // later (random if none is up). Steer it: if another monster will make us pray
@@ -743,6 +844,71 @@ public final class InfernoBrain {
         } else if (!attackingNextTick && o.isPrayerActive(offensive)) {
             actions.add("PRAY " + offensive + " 0");
         }
+    }
+
+    /**
+     * Whether a blob can attack us next tick, or could within the last {@link #BLOB_SCAN_LEAD}
+     * ticks: once it has read our prayer it fires even if we have since broken line of sight.
+     */
+    private boolean blobInView(InfernoObservation o, InfernoGrid grid, WorldPoint stand, boolean[][] occ) {
+        boolean any = false;
+        for (Npc n : o.npcs) {
+            Tracker t = trackers.get(n.index);
+            if (t == null || t.type != InfernoNpcType.BLOB) {
+                continue;
+            }
+            if (canAttackNextTick(grid, InfernoNpcType.BLOB, area(n), stand, occ)) {
+                t.lastInViewTick = o.tick;
+            }
+            any |= o.tick - t.lastInViewTick <= BLOB_SCAN_LEAD;
+        }
+        return any;
+    }
+
+    /**
+     * Magic or Missiles for {@code tick} under the alternating pattern, with the phase that
+     * best covers the known attack cycles of non-blob magic/ranged attackers over the next
+     * 12 ticks (weighted by protection priority).
+     */
+    private Prayer alternatingPrayer(InfernoObservation o, InfernoGrid grid, WorldPoint stand, boolean[][] occ, int tick) {
+        int[] phaseScore = new int[2];
+        for (Npc n : o.npcs) {
+            Tracker t = trackers.get(n.index);
+            if (t == null || t.type == InfernoNpcType.BLOB || t.nextAttackTick < 0 || t.type.isMeleeOnly()) {
+                continue;
+            }
+            Prayer need = prayerFor(t.type.getDefaultStyle());
+            if (need != Prayer.PROTECT_MAGIC && need != Prayer.PROTECT_MISSILES) {
+                continue;
+            }
+            if (!InfernoThreatModel.canReachToAttack(grid, t.type, area(n), stand, occ)) {
+                continue;
+            }
+            int speed = attackSpeed(t.type, o.wave);
+            for (int a = Math.max(t.nextAttackTick, o.tick + 1); a <= o.tick + 12; a += speed) {
+                for (int phase = 0; phase < 2; phase++) {
+                    if (alternate(a, phase) == need) {
+                        phaseScore[phase] += t.type.getProtectPriority();
+                    }
+                }
+            }
+        }
+        int phase = phaseScore[1] > phaseScore[0] ? 1 : 0;
+        return alternate(tick, phase);
+    }
+
+    private static boolean magerThreat(InfernoObservation o, InfernoGrid grid, WorldPoint stand, boolean[][] occ) {
+        for (Npc n : o.npcs) {
+            if (InfernoNpcType.forNpcId(n.id) == InfernoNpcType.MAGER
+                    && InfernoThreatModel.canReachToAttack(grid, InfernoNpcType.MAGER, area(n), stand, occ)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Prayer alternate(int tick, int phase) {
+        return ((tick + phase) & 1) == 0 ? Prayer.PROTECT_MAGIC : Prayer.PROTECT_MISSILES;
     }
 
     /**
@@ -1165,12 +1331,26 @@ public final class InfernoBrain {
 
     /** Fragile monsters (two shots or fewer) that are hitting us right now jump the queue. */
     static final int FRAGILE_ATTACKER_PRIORITY = tunableInt("FRAGILE_ATTACKER_PRIORITY", 5);
+    /**
+     * Kill priority of a meleer that can hit us now (-1 = keep the normal order). While it is
+     * beside us, Protect from Melee keeps taking the prayer from every other monster.
+     */
+    static final int ATTACKING_MELEER_PRIORITY = tunableInt("ATTACKING_MELEER_PRIORITY", -1);
+    /**
+     * 1 = a blob that regains line of sight reads our prayer again and restarts its 3-tick
+     * countdown even mid-cycle (the simulator's rule, and the community "step out, it reads you"
+     * advice); 0 = only on first contact.
+     */
+    static final int BLOB_RESCAN_ON_REGAIN = tunableInt("BLOB_RESCAN_ON_REGAIN", 1);
 
     private int killPriority(Npc n, InfernoNpcType type, boolean pillarsUp) {
         boolean fragile = type == InfernoNpcType.BAT || type == InfernoNpcType.BLOB_SPLIT_MAGE
                 || type == InfernoNpcType.BLOB_SPLIT_RANGE || type == InfernoNpcType.BLOB_SPLIT_MELEE;
         if (fragile && attackingNow.contains(n.index)) {
             return FRAGILE_ATTACKER_PRIORITY;
+        }
+        if (type == InfernoNpcType.MELEER && ATTACKING_MELEER_PRIORITY >= 0 && attackingNow.contains(n.index)) {
+            return ATTACKING_MELEER_PRIORITY;
         }
         return InfernoThreatModelAccess.killPriority(type, pillarsUp);
     }
