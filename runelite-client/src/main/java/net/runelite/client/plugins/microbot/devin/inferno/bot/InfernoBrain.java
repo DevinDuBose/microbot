@@ -100,6 +100,8 @@ public final class InfernoBrain {
     static final int FLICK_PROTECTION = tunableInt("FLICK_PROTECTION", 1);
     /** 1 = walk toward nibblers eating a pillar even while other monsters are hittable. */
     static final int NIBBLER_APPROACH = tunableInt("NIBBLER_APPROACH", 1);
+    /** 1 = also swap into Ahrim's robes to barrage (accuracy), at the cost of ranged defence. */
+    static final int MAGE_ARMOUR_SWITCH = tunableInt("MAGE_ARMOUR_SWITCH", 0);
     /** 1 = offensive prayer only on our attack ticks; 0 = keep it on. */
     static final int FLICK_OFFENSIVE = tunableInt("FLICK_OFFENSIVE", 1);
     /** Assumed share of a monster's max hit dealt per attack (hit chance x average roll). */
@@ -118,6 +120,8 @@ public final class InfernoBrain {
         final InfernoNpcType type;
         int nextAttackTick = -1;
         Style lastStyle;
+        /** Whether it could attack the player last tick (blob first-contact detection). */
+        boolean couldAttackLastTick;
 
         Tracker(int index, InfernoNpcType type) {
             this.index = index;
@@ -163,6 +167,7 @@ public final class InfernoBrain {
         InfernoGrid grid = buildGrid(o);
         WorldPoint me = new WorldPoint(o.x, o.y, 0);
         idleTicks = anyHittable(grid, o, me) ? 0 : idleTicks + 1;
+        detectBlobFirstContact(o, grid, me);
         attackingNow.clear();
         for (Npc n : o.npcs) {
             InfernoNpcType type = InfernoNpcType.forNpcId(n.id);
@@ -240,6 +245,27 @@ public final class InfernoBrain {
         trackers.keySet().retainAll(seen);
     }
 
+    /**
+     * A blob reads our prayer the moment it gains line of sight (no animation) and attacks 3
+     * ticks later; afterwards its cycle is visible through attack animations. Without this the
+     * first attack of every contact was unpredictable (the top damage source in simulation).
+     * Same rule as the xKylee Inferno plugin.
+     */
+    private void detectBlobFirstContact(InfernoObservation o, InfernoGrid grid, WorldPoint me) {
+        for (Npc n : o.npcs) {
+            Tracker t = trackers.get(n.index);
+            if (t == null || t.type != InfernoNpcType.BLOB) {
+                continue;
+            }
+            boolean canAttack = InfernoThreatModel.canAttack(grid, t.type, area(n), me);
+            boolean cycleRunning = t.nextAttackTick > o.tick;
+            if (canAttack && !t.couldAttackLastTick && !cycleRunning) {
+                t.nextAttackTick = o.tick + BLOB_SCAN_LEAD;
+            }
+            t.couldAttackLastTick = canAttack;
+        }
+    }
+
     static int attackSpeed(InfernoNpcType type, int wave) {
         if (type == InfernoNpcType.JAD && wave == 68) {
             return InfernoNpcType.TRIPLE_JAD_ATTACK_SPEED;
@@ -303,7 +329,7 @@ public final class InfernoBrain {
      */
     static boolean canHit(InfernoGrid grid, InfernoObservation o, WorldPoint from, Npc n) {
         WorldArea a = area(n);
-        return a.distanceTo(from) <= o.weaponRange && grid.hasLineOfSightToClosestTile(from, a);
+        return a.distanceTo(from) <= maxRange(o) && grid.hasLineOfSightToClosestTile(from, a);
     }
 
     // ------------------------------------------------------------------ positioning
@@ -633,9 +659,11 @@ public final class InfernoBrain {
         }
         if (wanted == null && blobReadsNextTick(o, grid, stand, occ, nextTick)) {
             // A blob reads our protection on this tick and attacks with the other style 3 ticks
-            // later. With no protection up it picks at random, so show it Magic: it will use
-            // Ranged, which we then protect against.
-            wanted = Prayer.PROTECT_MAGIC;
+            // later (random if none is up). Steer it: if another monster will make us pray
+            // Magic or Missiles on that tick, show the blob the opposite so it picks the style
+            // we will already be protecting against. Otherwise show Magic (blob uses Ranged).
+            Prayer planned = plannedProtectionAt(o, grid, stand, occ, nextTick + BLOB_SCAN_LEAD);
+            wanted = planned == Prayer.PROTECT_MAGIC ? Prayer.PROTECT_MISSILES : Prayer.PROTECT_MAGIC;
         }
 
         // Prayer drains for every tick it is active, so protection is only up on ticks an
@@ -656,6 +684,35 @@ public final class InfernoBrain {
         } else if (!attackingNextTick && o.isPrayerActive(offensive)) {
             actions.add("PRAY " + offensive + " 0");
         }
+    }
+
+    /**
+     * Protection the highest-priority non-blob attacker will need on {@code tick}, from observed
+     * attack cycles (next attack plus whole attack periods), or null if none is predicted.
+     */
+    private Prayer plannedProtectionAt(InfernoObservation o, InfernoGrid grid, WorldPoint stand, boolean[][] occ, int tick) {
+        Prayer best = null;
+        int bestPriority = -1;
+        for (Npc n : o.npcs) {
+            Tracker t = trackers.get(n.index);
+            if (t == null || t.type == InfernoNpcType.BLOB || t.nextAttackTick < 0 || t.type.getProtectPriority() == 0) {
+                continue;
+            }
+            int speed = attackSpeed(t.type, o.wave);
+            int next = Math.max(t.nextAttackTick, o.tick + 1);
+            if (tick < next || (tick - next) % speed != 0) {
+                continue;
+            }
+            if (!InfernoThreatModel.canReachToAttack(grid, t.type, area(n), stand, occ)) {
+                continue;
+            }
+            Prayer p = protectionFor(t, n, stand, tick);
+            if (p != null && t.type.getProtectPriority() > bestPriority) {
+                best = p;
+                bestPriority = t.type.getProtectPriority();
+            }
+        }
+        return best;
     }
 
     /**
@@ -755,6 +812,99 @@ public final class InfernoBrain {
         return best;
     }
 
+    /** Ranged weapons the brain knows: rapid-style range and attack speed (OSRS Wiki). */
+    enum RangedWeapon {
+        ARMADYL_CROSSBOW(8, 5),
+        RUNE_CROSSBOW(7, 5),
+        TOXIC_BLOWPIPE(5, 2);
+
+        final int range;
+        final int speed;
+
+        RangedWeapon(int range, int speed) {
+            this.range = range;
+            this.speed = speed;
+        }
+    }
+
+    /** Ranged weapons we wear or carry. Falls back to the observed weapon range if none is known. */
+    private static List<RangedWeapon> rangedWeapons(InfernoObservation o) {
+        List<RangedWeapon> out = new ArrayList<>();
+        for (RangedWeapon w : RangedWeapon.values()) {
+            if (o.worn.contains(w.name()) || hasItem(o, w.name())) {
+                out.add(w);
+            }
+        }
+        return out;
+    }
+
+    /** Longest reach among our ranged weapons. */
+    static int maxRange(InfernoObservation o) {
+        int r = 0;
+        for (RangedWeapon w : rangedWeapons(o)) {
+            r = Math.max(r, w.range);
+        }
+        return r > 0 ? r : o.weaponRange;
+    }
+
+    private static boolean hasItem(InfernoObservation o, String name) {
+        for (InfernoObservation.Item i : o.inventory) {
+            if (i.name.equals(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static InfernoObservation.Item item(InfernoObservation o, String name) {
+        for (InfernoObservation.Item i : o.inventory) {
+            if (i.name.equals(name)) {
+                return i;
+            }
+        }
+        return null;
+    }
+
+    /** Equip {@code name} from the inventory if it is not already worn. */
+    private static void wear(InfernoObservation o, String name, List<String> actions) {
+        if (o.worn.contains(name)) {
+            return;
+        }
+        InfernoObservation.Item i = item(o, name);
+        if (i != null) {
+            actions.add("USE " + i.slot);
+        }
+    }
+
+    /**
+     * Weapon for attacking {@code n} from {@code me}: the blowpipe (2-tick) for fragile targets
+     * within its reach, otherwise the longest-reaching weapon that can hit it.
+     */
+    private static RangedWeapon weaponFor(InfernoObservation o, WorldPoint me, Npc n) {
+        int dist = area(n).distanceTo(me);
+        List<RangedWeapon> weapons = rangedWeapons(o);
+        if (weapons.contains(RangedWeapon.TOXIC_BLOWPIPE) && dist <= RangedWeapon.TOXIC_BLOWPIPE.range && isFragile(n)) {
+            return RangedWeapon.TOXIC_BLOWPIPE;
+        }
+        RangedWeapon best = null;
+        for (RangedWeapon w : weapons) {
+            if (w != RangedWeapon.TOXIC_BLOWPIPE && dist <= w.range && (best == null || w.range > best.range)) {
+                best = w;
+            }
+        }
+        if (best == null && weapons.contains(RangedWeapon.TOXIC_BLOWPIPE) && dist <= RangedWeapon.TOXIC_BLOWPIPE.range) {
+            best = RangedWeapon.TOXIC_BLOWPIPE;
+        }
+        return best;
+    }
+
+    private static boolean isFragile(Npc n) {
+        InfernoNpcType t = InfernoNpcType.forNpcId(n.id);
+        return t == InfernoNpcType.NIBBLER || t == InfernoNpcType.BAT || t == InfernoNpcType.JAD_HEALER
+                || t == InfernoNpcType.ZUK_HEALER || t == InfernoNpcType.BLOB_SPLIT_MAGE
+                || t == InfernoNpcType.BLOB_SPLIT_RANGE || t == InfernoNpcType.BLOB_SPLIT_MELEE;
+    }
+
     /** Ice Barrage: 10-tile range, 3x3 area around the target (OSRS Wiki). */
     static final int BARRAGE_RANGE = 10;
 
@@ -820,12 +970,28 @@ public final class InfernoBrain {
         pendingCastTick = -1;
         Npc clump = barrageTarget(o, grid, me);
         if (clump != null && o.attackCooldown <= 1) {
+            wear(o, "ANCIENT_SCEPTRE", actions);
+            if (MAGE_ARMOUR_SWITCH == 1) {
+                wear(o, "AHRIMS_ROBETOP", actions);
+                wear(o, "AHRIMS_ROBESKIRT", actions);
+            }
             actions.add("CAST ICE_BARRAGE " + clump.index);
             pendingCastTick = o.tick;
             return;
         }
+        // Back into ranged armour after any barrage.
+        wear(o, "HUEYCOATL_HIDE_BODY", actions);
+        wear(o, "HUEYCOATL_HIDE_CHAPS", actions);
         Npc target = firstInKillOrder(o, grid, me);
-        if (target != null && target.index != o.targetIndex) {
+        if (target == null) {
+            return;
+        }
+        RangedWeapon weapon = weaponFor(o, me, target);
+        boolean switching = weapon != null && !o.worn.contains(weapon.name()) && hasItem(o, weapon.name());
+        if (switching) {
+            wear(o, weapon.name(), actions);
+        }
+        if (switching || target.index != o.targetIndex) {
             actions.add("ATTACK " + target.index);
         }
     }

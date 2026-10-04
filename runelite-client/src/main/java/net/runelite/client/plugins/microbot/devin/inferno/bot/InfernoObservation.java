@@ -36,6 +36,8 @@ public final class InfernoObservation {
     public final List<Prayer> activePrayers = new ArrayList<>();
 
     public final List<Item> inventory = new ArrayList<>();
+    /** Worn equipment item keys (e.g. ARMADYL_CROSSBOW, HUEYCOATL_HIDE_BODY). */
+    public final List<String> worn = new ArrayList<>();
     /** Spells the player can cast here (e.g. "ICE_BARRAGE": Ancient spellbook, runes, level 94). */
     public final List<String> spells = new ArrayList<>();
     public final List<Pillar> pillars = new ArrayList<>();

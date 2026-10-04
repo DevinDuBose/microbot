@@ -17,6 +17,7 @@ import java.util.List;
  *     TICK tick wave
  *     ME x y hp maxHp prayer maxPrayer ranged maxRanged weaponRange attackSpeed cooldown targetIndex prayers(csv|-)
  *     INV slot name doses
+ *     WORN itemKey                                   an equipped item
  *     SPELL name                                     castable spell, e.g. ICE_BARRAGE
  *     PILLAR x y hp
  *     NPC index id x y size hpPercent animation
@@ -73,6 +74,9 @@ public final class InfernoBrainServer {
                     break;
                 case "INV":
                     o.inventory.add(new InfernoObservation.Item(i(f[1]), f[2], i(f[3])));
+                    break;
+                case "WORN":
+                    o.worn.add(f[1]);
                     break;
                 case "SPELL":
                     o.spells.add(f[1]);
