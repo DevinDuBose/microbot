@@ -4,7 +4,12 @@ import net.runelite.api.Client
 import net.runelite.api.events.ChatMessage
 
 abstract class StateMachineScript {
-    var state: State = getStartState()
+    // Resolved lazily: calling an abstract method from the constructor runs before
+    // subclass properties (e.g. constructor-captured config providers) are assigned.
+    private var currentState: State? = null
+    var state: State
+        get() = currentState ?: getStartState().also { currentState = it }
+        set(value) { currentState = value }
     var stopped = false
     abstract fun getStartState(): State
 
