@@ -124,6 +124,21 @@ public enum InfernoNpcType {
         STYLE_PROJECTILES = Collections.unmodifiableMap(p);
     }
 
+    /**
+     * Every style-bearing attack projectile (spotanim ids verified in the game cache): blob and
+     * split ones (as above) plus the mager, ranger and bat. Used to time protection prayers to
+     * the tick each projectile lands.
+     */
+    public static final Map<Integer, Style> ATTACK_PROJECTILES;
+
+    static {
+        Map<Integer, Style> p = new HashMap<>(STYLE_PROJECTILES);
+        p.put(SpotanimID.INFERNO_ZEK_PROJECTILE, Style.MAGIC);
+        p.put(SpotanimID.INFERNO_XIL_PROJECTILE, Style.RANGE);
+        p.put(SpotanimID.INFERNO_HARPIE_PROJ, Style.RANGE);
+        ATTACK_PROJECTILES = Collections.unmodifiableMap(p);
+    }
+
     public enum Style {
         MELEE, RANGE, MAGIC, UNKNOWN
     }

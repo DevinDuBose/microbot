@@ -102,6 +102,19 @@ public final class InfernoBrain {
     static final int NIBBLER_APPROACH = tunableInt("NIBBLER_APPROACH", 1);
     /** 1 = also swap into Ahrim's robes to barrage (accuracy), at the cost of ranged defence. */
     static final int MAGE_ARMOUR_SWITCH = tunableInt("MAGE_ARMOUR_SWITCH", 0);
+    /**
+     * Cost of standing beside the meleer while anything else can also hit us. Its melee is
+     * avoided entirely by one step, while praying against it leaves every other monster
+     * unprotected (simulation: the top damage source in waves 21-40, blob hits landing while
+     * Protect from Melee was up).
+     */
+    static final double MELEER_ADJACENT_COST = tunable("MELEER_ADJACENT_COST", 3.0);
+    /**
+     * 1 = protection prayers are checked when a projectile lands (the evidence: Jal-Ak guidance,
+     * the live-tuned Jad flicker), so ranged/magic hits are protected on their impact tick from
+     * observed projectiles; 0 = checked when the monster attacks.
+     */
+    static final int IMPACT_PRAYER = tunableInt("IMPACT_PRAYER", 1);
     /** 1 = offensive prayer only on our attack ticks; 0 = keep it on. */
     static final int FLICK_OFFENSIVE = tunableInt("FLICK_OFFENSIVE", 1);
     /** Assumed share of a monster's max hit dealt per attack (hit chance x average roll). */
@@ -122,6 +135,8 @@ public final class InfernoBrain {
         Style lastStyle;
         /** Whether it could attack the player last tick (blob first-contact detection). */
         boolean couldAttackLastTick;
+        /** Meleer underground: no threat until it resurfaces. */
+        boolean burrowed;
 
         Tracker(int index, InfernoNpcType type) {
             this.index = index;
@@ -232,6 +247,12 @@ public final class InfernoBrain {
                     t.nextAttackTick = o.tick + attackSpeed(type, o.wave);
                 } else if (type == InfernoNpcType.MAGER && n.animation == InfernoNpcType.MAGER_RESURRECT_ANIMATION) {
                     t.nextAttackTick = o.tick + InfernoNpcType.MAGER_RESURRECT_LOCKOUT;
+                } else if (type == InfernoNpcType.MELEER && n.animation == InfernoNpcType.MELEER_DIG_ANIMATION) {
+                    t.burrowed = true;
+                } else if (type == InfernoNpcType.MELEER && n.animation == InfernoNpcType.MELEER_RESURFACE_ANIMATION) {
+                    // OSRS Wiki: six ticks after resurfacing before it attacks.
+                    t.burrowed = false;
+                    t.nextAttackTick = o.tick + InfernoNpcType.MELEER_RESURFACE_DELAY;
                 }
             }
         }
@@ -404,14 +425,22 @@ public final class InfernoBrain {
     private double tileScore(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me, WorldPoint t, Npc focus) {
         List<Threat> threats = new ArrayList<>();
         double unpredictable = 0;
+        boolean meleerAdjacent = false;
         for (Npc n : o.npcs) {
             InfernoNpcType type = InfernoNpcType.forNpcId(n.id);
             if (type == null || !type.isThreat()) {
                 continue;
             }
             WorldArea a = area(n);
+            Tracker burrowCheck = trackers.get(n.index);
+            if (burrowCheck != null && burrowCheck.burrowed) {
+                continue; // underground: resurfaces next to us later, timed by its animation
+            }
             if (!InfernoThreatModel.canReachToAttack(grid, type, a, t, occ)) {
                 continue;
+            }
+            if (type == InfernoNpcType.MELEER && InfernoThreatModel.canAttack(grid, type, a, t)) {
+                meleerAdjacent = true;
             }
             double dps = EXPECTED_HIT_FRACTION * MaxHits.of(type, false) / type.getAttackSpeed();
             if (!type.isMeleeOnly() && a.isInMeleeDistance(t)) {
@@ -430,10 +459,17 @@ public final class InfernoBrain {
             } else {
                 next = tr.nextAttackTick > o.tick ? tr.nextAttackTick : o.tick + 1;
             }
+            if (IMPACT_PRAYER == 1 && next >= 0) {
+                // Prayer is checked when the hit lands: collide on landing ticks, not attack ticks.
+                next += travelTicks(type, type.getDefaultStyle(), a.distanceTo(t));
+            }
             threats.add(new Threat(type.getDefaultStyle(), dps, type.getProtectPriority(),
                     attackSpeed(type, o.wave), next));
         }
         double unprotected = unpredictable;
+        if (meleerAdjacent && threats.size() > 1) {
+            unprotected += MELEER_ADJACENT_COST;
+        }
         for (Threat a : threats) {
             double worst = 0;
             for (Threat b : threats) {
@@ -630,9 +666,30 @@ public final class InfernoBrain {
         int soonestPriority = -1;
 
         boolean[][] occ = occupied(grid, o);
+        if (IMPACT_PRAYER == 1) {
+            // Ranged/magic: everything landing next tick is already in flight, so protect against
+            // the highest-priority projectile due to land then.
+            for (InfernoObservation.Projectile pr : o.projectiles) {
+                Style style = InfernoNpcType.ATTACK_PROJECTILES.get(pr.spotanimId);
+                Tracker src = trackers.get(pr.sourceIndex);
+                if (style == null || pr.ticksToImpact > 1) {
+                    continue;
+                }
+                int prio = src != null ? src.type.getProtectPriority() : 1;
+                Prayer p = prayerFor(style);
+                if (p != null && prio > wantedPriority) {
+                    wanted = p;
+                    wantedPriority = prio;
+                }
+            }
+        }
         for (Npc n : o.npcs) {
             Tracker t = trackers.get(n.index);
-            if (t == null || !t.type.isThreat() || t.type.getProtectPriority() == 0) {
+            if (t == null || !t.type.isThreat() || t.type.getProtectPriority() == 0 || t.burrowed) {
+                continue;
+            }
+            if (IMPACT_PRAYER == 1 && !hitsOnAttackTick(t, n, stand)) {
+                // Its ranged/magic hit is protected on impact via the projectile above.
                 continue;
             }
             if (!canAttackNextTick(grid, t.type, area(n), stand, occ)) {
@@ -662,7 +719,7 @@ public final class InfernoBrain {
             // later (random if none is up). Steer it: if another monster will make us pray
             // Magic or Missiles on that tick, show the blob the opposite so it picks the style
             // we will already be protecting against. Otherwise show Magic (blob uses Ranged).
-            Prayer planned = plannedProtectionAt(o, grid, stand, occ, nextTick + BLOB_SCAN_LEAD);
+            Prayer planned = plannedProtectionAt(o, grid, stand, occ, blobLandingTick(o, stand, nextTick + BLOB_SCAN_LEAD));
             wanted = planned == Prayer.PROTECT_MAGIC ? Prayer.PROTECT_MISSILES : Prayer.PROTECT_MAGIC;
         }
 
@@ -700,6 +757,9 @@ public final class InfernoBrain {
             }
             int speed = attackSpeed(t.type, o.wave);
             int next = Math.max(t.nextAttackTick, o.tick + 1);
+            if (IMPACT_PRAYER == 1 && !hitsOnAttackTick(t, n, stand)) {
+                next += travelTicks(t.type, t.type.getDefaultStyle(), area(n).distanceTo(stand));
+            }
             if (tick < next || (tick - next) % speed != 0) {
                 continue;
             }
@@ -733,6 +793,63 @@ public final class InfernoBrain {
             }
         }
         return false;
+    }
+
+    /**
+     * Ticks from attack to hit landing: 0 for melee; the OSRS projectile formulas used by the
+     * InfernoTrainer engine otherwise (magic 1 + (1 + d) / 3, ranged 1 + (3 + d) / 6).
+     * UNVERIFIED for these NPCs specifically; live projectiles report their exact remaining time.
+     */
+    static int travelTicks(InfernoNpcType type, Style style, int distance) {
+        if (type.isMeleeOnly() || style == Style.MELEE) {
+            return 0;
+        }
+        if (style == Style.RANGE) {
+            return 1 + (3 + distance) / 6;
+        }
+        return 1 + (1 + distance) / 3;
+    }
+
+    /** Tick the hit of a blob attacking on {@code attackTick} would land (magic timing assumed). */
+    private int blobLandingTick(InfernoObservation o, WorldPoint stand, int attackTick) {
+        if (IMPACT_PRAYER == 0) {
+            return attackTick;
+        }
+        int best = attackTick;
+        for (Npc n : o.npcs) {
+            Tracker t = trackers.get(n.index);
+            if (t != null && t.type == InfernoNpcType.BLOB) {
+                best = attackTick + travelTicks(t.type, Style.MAGIC, area(n).distanceTo(stand));
+                break;
+            }
+        }
+        return best;
+    }
+
+    static Prayer prayerFor(Style style) {
+        switch (style) {
+            case MAGIC:
+                return Prayer.PROTECT_MAGIC;
+            case RANGE:
+                return Prayer.PROTECT_MISSILES;
+            case MELEE:
+                return Prayer.PROTECT_MELEE;
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * Whether this monster's next hit lands on its attack tick (melee) rather than when a
+     * projectile arrives. Adjacent rangers/magers/blobs may melee.
+     */
+    private static boolean hitsOnAttackTick(Tracker t, Npc n, WorldPoint stand) {
+        if (t.type.isMeleeOnly() || t.type == InfernoNpcType.JAD) {
+            // Jad's projectiles are not identified yet: keep timing him from his animation.
+            return true;
+        }
+        return area(n).isInMeleeDistance(stand) && (t.type == InfernoNpcType.RANGER
+                || t.type == InfernoNpcType.MAGER || t.type == InfernoNpcType.BLOB || t.type == InfernoNpcType.JAD);
     }
 
     /**
