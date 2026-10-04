@@ -124,6 +124,10 @@ public final class InfernoBrain {
      * stand on the pillar they stay clumped (0 = never wait).
      */
     static final int CLUMP_WAIT = tunableInt("CLUMP_WAIT", 8);
+    /** Kill priority of the blob: after mager and ranger, before the meleer (-1 = the helper table, after the meleer). Sim, 12 runs of waves 1-66: 57.3 avg waves vs 53.1. */
+    static final int BLOB_KILL_PRIORITY = tunableInt("BLOB_KILL_PRIORITY", 25);
+    /** Kill priority override for the magic split, which resists barrage (-1 = table). */
+    static final int MAGE_SPLIT_KILL_PRIORITY = tunableInt("MAGE_SPLIT_KILL_PRIORITY", -1);
     /** Run energy (0-10000) at which run is switched back on after it ran out. */
     static final int RUN_ON_ENERGY = tunableInt("RUN_ON_ENERGY", 500);
     /** Diagnostics: tick whose prayer decision is printed to stderr (-1 = none). */
@@ -1774,6 +1778,12 @@ public final class InfernoBrain {
         static int killPriority(InfernoNpcType type, boolean pillarsUp) {
             if (type == InfernoNpcType.NIBBLER) {
                 return pillarsUp ? -1 : type.getKillPriority();
+            }
+            if (type == InfernoNpcType.BLOB && BLOB_KILL_PRIORITY >= 0) {
+                return BLOB_KILL_PRIORITY;
+            }
+            if (type == InfernoNpcType.BLOB_SPLIT_MAGE && MAGE_SPLIT_KILL_PRIORITY >= 0) {
+                return MAGE_SPLIT_KILL_PRIORITY;
             }
             return type.getKillPriority();
         }
