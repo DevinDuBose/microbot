@@ -777,7 +777,9 @@ public final class InfernoBrain {
      * before the Jal-ImKot attacks after resurfacing"; prayer timing handles that.) When a meleer
      * is up and nothing can reach us, hold position instead of moving out to engage.
      */
-    static final int MELEER_DIG_WAIT = tunableInt("MELEER_DIG_WAIT", 1);
+    // Off: the wiki calls it optional ("it may be a good idea"), and in the sim it did worse
+    // (12 runs of waves 1-66: 47.6 avg waves vs 52.9 without).
+    static final int MELEER_DIG_WAIT = tunableInt("MELEER_DIG_WAIT", 0);
 
     private boolean waitForMeleerDig(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me) {
         boolean meleer = false;
@@ -813,6 +815,16 @@ public final class InfernoBrain {
     private final Map<WorldPoint, Integer> bannedCorners = new HashMap<>();
 
     private WorldPoint cornerTrapTile(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me) {
+        // Nibblers come first while they threaten a standing pillar (wiki: freeze them at the
+        // start of each wave; "do not risk your life over it in the higher waves (50+)"). A
+        // corner trap during that window cost pillar HP (sim: 623 vs 711 left at wave 10).
+        if (!o.pillars.isEmpty() && o.wave < 50) {
+            for (Npc n : o.npcs) {
+                if (InfernoNpcType.forNpcId(n.id) == InfernoNpcType.NIBBLER && !expectedDead(n, o)) {
+                    return null;
+                }
+            }
+        }
         List<Npc> here = reachingAttackers(o, grid, occ, me);
         if (here.size() < 2) {
             return null;
