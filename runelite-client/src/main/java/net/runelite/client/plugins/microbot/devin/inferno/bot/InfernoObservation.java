@@ -30,6 +30,10 @@ public final class InfernoObservation {
     public int attackSpeed;
     /** Ticks until the player can attack again (0 = ready). */
     public int attackCooldown;
+    /** Run energy, 0-10000 as {@code Client.getEnergy()} reports it; absent = full. */
+    public int runEnergy = 10000;
+    /** Whether run is switched on; absent = on. */
+    public boolean running = true;
     /** NPC index the player is attacking, or -1. */
     public int targetIndex = -1;
     /** Active prayer names (see {@link Prayer}). */

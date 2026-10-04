@@ -124,6 +124,10 @@ public final class InfernoBrain {
      * stand on the pillar they stay clumped (0 = never wait).
      */
     static final int CLUMP_WAIT = tunableInt("CLUMP_WAIT", 8);
+    /** Run energy (0-10000) at which run is switched back on after it ran out. */
+    static final int RUN_ON_ENERGY = tunableInt("RUN_ON_ENERGY", 500);
+    /** Diagnostics: tick whose prayer decision is printed to stderr (-1 = none). */
+    static final int DEBUG_TICK = tunableInt("DEBUG_TICK", -1);
     /** 1 = pray Melee against an adjacent blob (old behaviour); 0 = cover its scanned style. */
     static final int BLOB_ADJACENT_MELEE = tunableInt("BLOB_ADJACENT_MELEE", 0);
     /**
@@ -236,6 +240,12 @@ public final class InfernoBrain {
             if (type != null && type.isThreat() && InfernoThreatModel.canAttack(grid, type, area(n), me)) {
                 attackingNow.add(n.index);
             }
+        }
+
+        // Run switches itself off at 0 energy; walking halves our speed for the rest of the
+        // run (seen in simulation: a meleer chasing us for 30 ticks), so switch it back on.
+        if (!o.running && o.runEnergy >= RUN_ON_ENERGY) {
+            actions.add("RUN 1");
         }
 
         if (o.npcs.isEmpty()) {
@@ -1085,7 +1095,12 @@ public final class InfernoBrain {
                 // Its ranged/magic hit is protected on impact via the projectile above.
                 continue;
             }
-            if (!canAttackNextTick(grid, t.type, area(n), stand, occ)) {
+            boolean reach = canAttackNextTick(grid, t.type, area(n), stand, occ);
+            if (DEBUG_TICK == o.tick) {
+                System.err.println("PRAYDBG t" + o.tick + " npc " + n.index + " " + t.type + " at " + n.x + "," + n.y
+                        + " stand " + stand + " reach " + reach + " next " + t.nextAttackTick);
+            }
+            if (!reach) {
                 continue;
             }
             int attackTick = t.nextAttackTick < 0 ? nextTick : Math.max(t.nextAttackTick, nextTick);

@@ -72,6 +72,10 @@ public final class InfernoBrainServer {
                         }
                     }
                     break;
+                case "RUNE":
+                    o.runEnergy = i(f[1]);
+                    o.running = i(f[2]) == 1;
+                    break;
                 case "INV":
                     o.inventory.add(new InfernoObservation.Item(i(f[1]), f[2], i(f[3])));
                     break;
