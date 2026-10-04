@@ -124,6 +124,8 @@ public final class InfernoBrain {
      * stand on the pillar they stay clumped (0 = never wait).
      */
     static final int CLUMP_WAIT = tunableInt("CLUMP_WAIT", 8);
+    /** 1 = pray Melee against an adjacent blob (old behaviour); 0 = cover its scanned style. */
+    static final int BLOB_ADJACENT_MELEE = tunableInt("BLOB_ADJACENT_MELEE", 0);
     /** 1 = choose protection for the tile we will occupy next tick (0 = the destination). */
     static final int PRAY_AT_NEXT_TILE = tunableInt("PRAY_AT_NEXT_TILE", 1);
     /**
@@ -1131,7 +1133,10 @@ public final class InfernoBrain {
         if (t.type == InfernoNpcType.BLOB) {
             // The blob reads the protection prayer 3 ticks before attacking and uses the other style.
             Prayer read = protectionByTick.get(attackTick - BLOB_SCAN_LEAD);
-            if (area(n).isInMeleeDistance(stand) && read != Prayer.PROTECT_MELEE) {
+            // Beside us it melees only by chance (OSRS Wiki: "a random chance ... instead of a
+            // ranged/magic attack"), and only while we are not praying Melee; praying Melee
+            // instead makes its scanned style a certain hit. So the scanned style is covered.
+            if (BLOB_ADJACENT_MELEE == 1 && area(n).isInMeleeDistance(stand) && read != Prayer.PROTECT_MELEE) {
                 style = Style.MELEE;
             } else if (read == Prayer.PROTECT_MAGIC) {
                 style = Style.RANGE;
