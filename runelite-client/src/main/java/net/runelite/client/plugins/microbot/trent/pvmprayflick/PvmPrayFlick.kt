@@ -562,8 +562,9 @@ class PvmPrayFlick : Plugin() {
  *
  * [priority] breaks ties when attacks from several NPCs land on the same tick
  * (only one protection prayer can be up). Higher wins. Only meaningful in
- * multi-attacker fights — the Inferno ordering follows the standard
- * Jad > Mager > Ranger > Blob > Meleer > Bat damage ranking.
+ * multi-attacker fights. Inferno ordering is the OSRS Wiki's (Inferno/Strategies):
+ * "prioritise protection in order of mager > ranger > meleer > blob > bat",
+ * with Jad (113 max hit) above all and blob splits (18) just below the blob.
  */
 private data class BossConfig(
     val npcIds: Set<Int>,
@@ -814,7 +815,7 @@ private val BOSSES: List<BossConfig> = listOf(
         priority = 80,
     ),
 
-    // Jal-AkRek-Mej / -Xil / -Ket (blob splits).
+    // Jal-AkRek-Mej / -Xil / -Ket (blob splits). Below the blob in priority.
     BossConfig(
         npcIds = setOf(
             NpcID.INFERNO_CREATURE_SPLITTER_MAGE,
@@ -831,7 +832,7 @@ private val BOSSES: List<BossConfig> = listOf(
             SpotanimID.INFERNO_BABYSPLITTER_MAGE_BIGGEST to Rs2PrayerEnum.PROTECT_MAGIC,
             SpotanimID.INFERNO_BABYSPLITTER_RANGE to Rs2PrayerEnum.PROTECT_RANGE,
         ),
-        priority = 65,
+        priority = 55,
     ),
 
     // Jal-Ak (blob). Reads the active prayer and attacks with a style it
@@ -846,17 +847,17 @@ private val BOSSES: List<BossConfig> = listOf(
             SpotanimID.INFERNO_SPLITTER_MAGE to Rs2PrayerEnum.PROTECT_MAGIC,
             SpotanimID.INFERNO_SPLITTER_RANGE to Rs2PrayerEnum.PROTECT_RANGE,
         ),
-        priority = 70,
+        priority = 60,
     ),
 
     // Jal-ImKot (meleer).
     BossConfig(
-        npcIds = setOf(NpcID.INFERNO_CREATURE_MELEE, NpcID.INFERNO_CREATURE_MELEE_SMALL),
+        npcIds = setOf(NpcID.INFERNO_CREATURE_MELEE),
         nameKeyword = "jal-imkot",
         attackDelayTicks = 0,
         cooldownTicks = 2,
         attacks = mapOf(AnimationID.JALIMKOT_ATTACK to Rs2PrayerEnum.PROTECT_MELEE),
-        priority = 60,
+        priority = 70,
     ),
 
     // Jal-MejRah (bat).
