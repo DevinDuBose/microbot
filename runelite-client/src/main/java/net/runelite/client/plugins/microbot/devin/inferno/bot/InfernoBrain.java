@@ -231,6 +231,8 @@ public final class InfernoBrain {
         expectedKills.clear();
         pendingCastTarget = -1;
         safeTarget = null;
+        cornerTarget = null;
+        bannedCorners.clear();
     }
 
     public List<String> decide(InfernoObservation o) {
@@ -512,6 +514,11 @@ public final class InfernoBrain {
     private WorldPoint choosePosition(InfernoObservation o, InfernoGrid grid, WorldPoint me) {
         boolean[][] occ = occupied(grid, o);
         Npc focus = firstInKillOrder(o, null, null);
+        offTickTarget = -1;
+        if (MELEER_DIG_WAIT == 1 && waitForMeleerDig(o, grid, occ, me)) {
+            techLog(o, "MELEER_DIG_WAIT at " + me);
+            return me;
+        }
         if (idleTicks > ENGAGE_AFTER_IDLE) {
             WorldPoint engage = engageTile(o, grid, occ, me);
             if (engage != null) {
@@ -534,6 +541,33 @@ public final class InfernoBrain {
                 committedTile = intercept;
                 committedUntil = o.tick + 1;
                 return intercept;
+            }
+        }
+        if (OFF_TICK == 1) {
+            WorldPoint middle = offTickTile(o, grid, occ, me);
+            if (middle != null) {
+                techLog(o, "OFF_TICK middle " + middle + " me " + me + " target " + offTickTarget);
+                return middle;
+            }
+        }
+        if (CORNER_TRAP == 1) {
+            WorldPoint corner = cornerTrapTile(o, grid, occ, me);
+            if (corner != null && !corner.equals(me)) {
+                // A corner we cannot get onto (seen: blocked for 9000 ticks) is dropped for a while.
+                if (!corner.equals(cornerTarget)) {
+                    cornerTarget = corner;
+                    cornerSince = o.tick;
+                } else if (o.tick - cornerSince > CORNER_REACH_TICKS) {
+                    bannedCorners.put(corner, o.tick + CORNER_BAN_TICKS);
+                    cornerTarget = null;
+                    corner = null;
+                }
+            }
+            if (corner != null) {
+                techLog(o, "CORNER_TRAP " + corner + " me " + me);
+                committedTile = corner;
+                committedUntil = o.tick + COMMIT_TICKS;
+                return corner;
             }
         }
         double currentScore = tileScore(o, grid, occ, me, me, focus);
@@ -703,6 +737,217 @@ public final class InfernoBrain {
             }
         }
         return best;
+    }
+
+    // ------------------------------------------------------------------ documented pillar techniques
+
+    /** Diagnostics: log when a documented technique takes over (stderr). */
+    static final int DIAG_TECH = tunableInt("DIAG_TECH", 0);
+
+    private static void techLog(InfernoObservation o, String msg) {
+        if (DIAG_TECH == 1) {
+            StringBuilder sb = new StringBuilder("TECH t" + o.tick + " w" + o.wave + " " + msg + " |");
+            for (Npc n : o.npcs) {
+                sb.append(' ').append(InfernoNpcType.forNpcId(n.id)).append('@').append(n.x).append(',').append(n.y);
+            }
+            System.err.println(sb);
+        }
+    }
+
+    /** Monsters (not nibblers, not underground) that can walk into attack range of {@code t}. */
+    private List<Npc> reachingAttackers(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint t) {
+        List<Npc> out = new ArrayList<>();
+        for (Npc n : o.npcs) {
+            InfernoNpcType type = InfernoNpcType.forNpcId(n.id);
+            Tracker tr = trackers.get(n.index);
+            if (type == null || !type.isThreat() || type.getProtectPriority() == 0 || (tr != null && tr.burrowed)) {
+                continue;
+            }
+            if (InfernoThreatModel.canReachToAttack(grid, type, area(n), t, occ)) {
+                out.add(n);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 1 = wait for a stuck meleer to dig. OSRS Wiki (Inferno/Strategies): "When they are stuck
+     * behind a pillar along with every other monster, it may be a good idea to wait for them to
+     * dig to you so you can take them out safely." (Jal-ImKot: "There is a six game tick delay
+     * before the Jal-ImKot attacks after resurfacing"; prayer timing handles that.) When a meleer
+     * is up and nothing can reach us, hold position instead of moving out to engage.
+     */
+    static final int MELEER_DIG_WAIT = tunableInt("MELEER_DIG_WAIT", 1);
+
+    private boolean waitForMeleerDig(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me) {
+        boolean meleer = false;
+        for (Npc n : o.npcs) {
+            InfernoNpcType type = InfernoNpcType.forNpcId(n.id);
+            Tracker tr = trackers.get(n.index);
+            if (type == InfernoNpcType.MELEER && (tr == null || !tr.burrowed)) {
+                meleer = true;
+            }
+            if (type == InfernoNpcType.NIBBLER && !o.pillars.isEmpty()) {
+                return false; // pillars need defending
+            }
+        }
+        return meleer && reachingAttackers(o, grid, occ, me).isEmpty();
+    }
+
+    /**
+     * 1 = corner trap. OSRS Wiki (Inferno/Strategies): "All monsters can be safespotted with a
+     * corner, but only if the player is standing in the north or south and the monster in the
+     * west or east. Both also have to be directly at the corner." Corner tiles: directly north
+     * of a pillar's NW/NE corner, directly south of its SW/SE corner; the trapped monster is on
+     * that corner's west (NW/SW) or east (NE/SE) side. Taken when two or more monsters can reach
+     * us here and a corner tile within reach leaves fewer, trapping (by the verified movement
+     * rules) a monster on the right side; higher-priority trapped monsters break ties.
+     */
+    static final int CORNER_TRAP = tunableInt("CORNER_TRAP", 1);
+    static final int CORNER_TRAP_RADIUS = 8;
+    /** Ticks to reach a picked corner before giving up on it, and how long it is then skipped. */
+    static final int CORNER_REACH_TICKS = 6;
+    static final int CORNER_BAN_TICKS = 20;
+    private WorldPoint cornerTarget;
+    private int cornerSince;
+    private final Map<WorldPoint, Integer> bannedCorners = new HashMap<>();
+
+    private WorldPoint cornerTrapTile(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me) {
+        List<Npc> here = reachingAttackers(o, grid, occ, me);
+        if (here.size() < 2) {
+            return null;
+        }
+        WorldPoint best = null;
+        int bestReach = here.size();
+        int bestTrapped = 0;
+        int bestDist = Integer.MAX_VALUE;
+        for (InfernoObservation.Pillar p : o.pillars) {
+            int west = p.x;
+            int east = p.x + PILLAR_SIZE - 1;
+            int south = p.y;
+            int north = p.y + PILLAR_SIZE - 1;
+            // {tile x, tile y, side: -1 west / +1 east}
+            int[][] corners = {
+                {west, north + 1, -1}, {east, north + 1, 1},
+                {west, south - 1, -1}, {east, south - 1, 1}};
+            for (int[] c : corners) {
+                WorldPoint t = new WorldPoint(c[0], c[1], 0);
+                int dist = Math.max(Math.abs(t.getX() - me.getX()), Math.abs(t.getY() - me.getY()));
+                int sx = t.getX() - GRID_BASE_X;
+                int sy = t.getY() - GRID_BASE_Y;
+                Integer bannedUntil = bannedCorners.get(t);
+                if (dist > CORNER_TRAP_RADIUS || !grid.isStandable(t) || occ[sx][sy]
+                        || (bannedUntil != null && o.tick < bannedUntil)) {
+                    continue;
+                }
+                List<Npc> reach = reachingAttackers(o, grid, occ, t);
+                int trapped = 0;
+                for (Npc n : here) {
+                    if (reach.contains(n)) {
+                        continue;
+                    }
+                    boolean onSide = c[2] < 0 ? n.x + n.size - 1 < west : n.x > east;
+                    if (onSide) {
+                        trapped += InfernoNpcType.forNpcId(n.id).getProtectPriority();
+                    }
+                }
+                if (trapped == 0) {
+                    continue;
+                }
+                // Only a corner that leaves strictly fewer monsters able to reach us is worth
+                // moving to (equal ones flip-flopped: 300 ticks between two corners).
+                if (reach.size() >= here.size()) {
+                    continue;
+                }
+                if (reach.size() < bestReach || (reach.size() == bestReach && (trapped > bestTrapped
+                        || (trapped == bestTrapped && dist < bestDist)))) {
+                    best = t;
+                    bestReach = reach.size();
+                    bestTrapped = trapped;
+                    bestDist = dist;
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * 1 = ranger/mager off-tick. OSRS Wiki (Inferno/Strategies): "stand in the middle tile of
+     * your side of the pillar and attack the farther one ... This will cause the farther one to
+     * attack you first and the closer to attack one tick after. This works both at the north and
+     * south pillar. If you do not attack from the middle tile, or if you click on the one closest
+     * to you, they will be attacking on the same tick." Applied when a ranger and a mager are
+     * both behind the same pillar (neither can attack the middle tile) with attacks due on the
+     * same tick: go to the middle tile of the pillar side facing away from them, then attack the
+     * farther one. (The orange/green fallback for a bat or blob in front is not implemented: it
+     * depends on an image whose tiles cannot be read reliably.)
+     */
+    static final int OFF_TICK = tunableInt("OFF_TICK", 1);
+    /** Index of the monster to attack for the off-tick, or -1. */
+    private int offTickTarget = -1;
+
+    private WorldPoint offTickTile(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me) {
+        Npc ranger = null;
+        Npc mager = null;
+        for (Npc n : o.npcs) {
+            InfernoNpcType type = InfernoNpcType.forNpcId(n.id);
+            if (type == InfernoNpcType.RANGER && ranger == null) {
+                ranger = n;
+            } else if (type == InfernoNpcType.MAGER && mager == null) {
+                mager = n;
+            }
+        }
+        if (ranger == null || mager == null) {
+            return null;
+        }
+        Tracker tr = trackers.get(ranger.index);
+        Tracker tm = trackers.get(mager.index);
+        boolean sameTick = tr != null && tm != null && tr.nextAttackTick >= 0 && tr.nextAttackTick == tm.nextAttackTick;
+        if (!sameTick) {
+            return null;
+        }
+        for (InfernoObservation.Pillar p : o.pillars) {
+            double pcx = p.x + 1;
+            double pcy = p.y + 1;
+            int side = sideOf(ranger.x + (ranger.size - 1) / 2.0 - pcx, ranger.y + (ranger.size - 1) / 2.0 - pcy);
+            if (side != sideOf(mager.x + (mager.size - 1) / 2.0 - pcx, mager.y + (mager.size - 1) / 2.0 - pcy)) {
+                continue;
+            }
+            WorldPoint middle;
+            if (side == 0) {
+                middle = new WorldPoint(p.x + 1, p.y - 1, 0); // they are north: we take the south side
+            } else if (side == 1) {
+                middle = new WorldPoint(p.x + 1, p.y + PILLAR_SIZE, 0); // they are south: north side
+            } else if (side == 2) {
+                middle = new WorldPoint(p.x + PILLAR_SIZE, p.y + 1, 0); // they are west: east side
+            } else {
+                middle = new WorldPoint(p.x - 1, p.y + 1, 0); // they are east: west side
+            }
+            int sx = middle.getX() - GRID_BASE_X;
+            int sy = middle.getY() - GRID_BASE_Y;
+            if (!grid.isStandable(middle) || occ[sx][sy]
+                    || Math.max(Math.abs(middle.getX() - me.getX()), Math.abs(middle.getY() - me.getY())) > 8) {
+                continue;
+            }
+            // "behind the pillar": neither can attack the middle tile right now.
+            if (InfernoThreatModel.canAttack(grid, InfernoNpcType.RANGER, area(ranger), middle)
+                    || InfernoThreatModel.canAttack(grid, InfernoNpcType.MAGER, area(mager), middle)) {
+                continue;
+            }
+            if (middle.equals(me)) {
+                offTickTarget = area(ranger).distanceTo(me) > area(mager).distanceTo(me) ? ranger.index : mager.index;
+            }
+            return middle;
+        }
+        return null;
+    }
+
+    /** 0 north, 1 south, 2 west, 3 east of the pillar centre, by the dominant axis. */
+    private static int sideOf(double dx, double dy) {
+        if (Math.abs(dy) >= Math.abs(dx)) {
+            return dy > 0 ? 0 : 1;
+        }
+        return dx < 0 ? 2 : 3;
     }
 
     private static boolean besidePillar(InfernoObservation o, Npc n) {
@@ -2089,7 +2334,10 @@ public final class InfernoBrain {
         // Back into ranged armour after any barrage.
         wear(o, "HUEYCOATL_HIDE_BODY", actions);
         wear(o, "HUEYCOATL_HIDE_CHAPS", actions);
-        Npc target = firstInKillOrder(o, grid, me);
+        Npc target = offTickTarget >= 0 ? npcByIndex(o, offTickTarget) : null;
+        if (target == null) {
+            target = firstInKillOrder(o, grid, me);
+        }
         if (target == null) {
             return;
         }
