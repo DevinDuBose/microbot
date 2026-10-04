@@ -58,6 +58,14 @@ public final class InfernoGrid {
         return new InfernoGrid(wv.getBaseX(), wv.getBaseY(), wv.getPlane(), copy);
     }
 
+    public int baseX() {
+        return baseX;
+    }
+
+    public int baseY() {
+        return baseY;
+    }
+
     public int sceneX(WorldPoint p) {
         return p.getX() - baseX;
     }

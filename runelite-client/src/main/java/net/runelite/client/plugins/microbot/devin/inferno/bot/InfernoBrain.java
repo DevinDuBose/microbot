@@ -118,6 +118,20 @@ public final class InfernoBrain {
      * (alternation cannot keep Magic up on a mager's shifting attack ticks).
      */
     static final int BLOB_ALTERNATE = tunableInt("BLOB_ALTERNATE", 0);
+    /**
+     * Ticks to hold a nibbler barrage while nibblers are still walking to their pillar: a
+     * queued cast fires a tick later, so moving nibblers spread out of the 3x3; once they
+     * stand on the pillar they stay clumped (0 = never wait).
+     */
+    static final int CLUMP_WAIT = tunableInt("CLUMP_WAIT", 8);
+    /** 1 = choose protection for the tile we will occupy next tick (0 = the destination). */
+    static final int PRAY_AT_NEXT_TILE = tunableInt("PRAY_AT_NEXT_TILE", 1);
+    /**
+     * 1 = a nibbler the crossbow cannot reach from here is worth a barrage even alone (it
+     * otherwise eats a pillar while we fight elsewhere; measured: lone nibblers out of range
+     * survived 60 ticks).
+     */
+    static final int BARRAGE_LONE_NIBBLER = tunableInt("BARRAGE_LONE_NIBBLER", 1);
     /** 1 = score tiles by a short look-ahead simulation of monster movement and attacks. */
     static final int ROLLOUT = tunableInt("ROLLOUT", 1);
     /** Look-ahead length in ticks. */
@@ -154,6 +168,11 @@ public final class InfernoBrain {
         boolean burrowed;
         /** Last tick a blob could see/attack us: a read prayer is fired even after we hide. */
         int lastInViewTick = -100;
+        /** Position last tick, and whether it changed since (nibbler clump detection). */
+        int lastX = Integer.MIN_VALUE;
+        int lastY;
+        boolean moved = true;
+        int firstSeenTick = -1;
 
         Tracker(int index, InfernoNpcType type) {
             this.index = index;
@@ -227,13 +246,77 @@ public final class InfernoBrain {
             movingTicks = 0;
         }
 
-        choosePrayers(o, grid, stand, actions);
+        // Prayer covers the tick ahead, so it is chosen for where we will be then (two run
+        // steps along the path), not for the destination.
+        WorldPoint next = PRAY_AT_NEXT_TILE == 1 ? stepToward(grid, me, stand, 2) : stand;
+        choosePrayers(o, grid, next, actions);
         useSupplies(o, actions);
         if (stand.equals(me)) {
             chooseTarget(o, grid, me, actions);
         }
         return actions;
     }
+
+    /** Neighbour order of the OSRS player path search (west, east, south, north, then diagonals). */
+    private static final int[][] PATH_DIRS = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+
+    /**
+     * Tile reached after {@code steps} steps of the shortest path from {@code from} to
+     * {@code dest} (breadth-first over the collision map; players walk through NPCs), or
+     * {@code dest} itself when it is unreachable or closer than that.
+     */
+    static WorldPoint stepToward(InfernoGrid grid, WorldPoint from, WorldPoint dest, int steps) {
+        if (from.equals(dest)) {
+            return dest;
+        }
+        int ox = from.getX() - SEARCH_PAD;
+        int oy = from.getY() - SEARCH_PAD;
+        int n = SEARCH_PAD * 2 + 1;
+        int[][] prev = new int[n][n];
+        for (int[] row : prev) {
+            java.util.Arrays.fill(row, -1);
+        }
+        int dx0 = dest.getX() - ox;
+        int dy0 = dest.getY() - oy;
+        if (dx0 < 0 || dy0 < 0 || dx0 >= n || dy0 >= n) {
+            return dest;
+        }
+        java.util.ArrayDeque<int[]> queue = new java.util.ArrayDeque<>();
+        prev[SEARCH_PAD][SEARCH_PAD] = SEARCH_PAD * n + SEARCH_PAD;
+        queue.add(new int[]{SEARCH_PAD, SEARCH_PAD});
+        InfernoGrid.TileFilter any = (x, y) -> true;
+        while (!queue.isEmpty() && prev[dx0][dy0] < 0) {
+            int[] c = queue.poll();
+            int sx = c[0] + ox - grid.baseX();
+            int sy = c[1] + oy - grid.baseY();
+            for (int[] d : PATH_DIRS) {
+                int nx = c[0] + d[0];
+                int ny = c[1] + d[1];
+                if (nx < 0 || ny < 0 || nx >= n || ny >= n || prev[nx][ny] >= 0 || !grid.inScene(sx + d[0], sy + d[1])
+                        || !grid.canTravelInDirection(sx, sy, 1, 1, d[0], d[1], any)) {
+                    continue;
+                }
+                prev[nx][ny] = c[0] * n + c[1];
+                queue.add(new int[]{nx, ny});
+            }
+        }
+        if (prev[dx0][dy0] < 0) {
+            return dest;
+        }
+        List<int[]> path = new ArrayList<>();
+        int cx = dx0;
+        int cy = dy0;
+        while (cx != SEARCH_PAD || cy != SEARCH_PAD) {
+            path.add(0, new int[]{cx, cy});
+            int pv = prev[cx][cy];
+            cx = pv / n;
+            cy = pv % n;
+        }
+        int[] at = path.get(Math.min(steps, path.size()) - 1);
+        return new WorldPoint(at[0] + ox, at[1] + oy, from.getPlane());
+    }
+
+    private static final int SEARCH_PAD = 40;
 
     // ------------------------------------------------------------------ tracking
 
@@ -257,6 +340,12 @@ public final class InfernoBrain {
             }
             seen.add(n.index);
             Tracker t = trackers.computeIfAbsent(n.index, i -> new Tracker(i, type));
+            if (t.firstSeenTick < 0) {
+                t.firstSeenTick = o.tick;
+            }
+            t.moved = t.lastX != n.x || t.lastY != n.y;
+            t.lastX = n.x;
+            t.lastY = n.y;
             if (n.animation >= 0) {
                 Style style = type.getAttackAnimations().get(n.animation);
                 if (style != null) {
@@ -1221,12 +1310,41 @@ public final class InfernoBrain {
                     hits++;
                 }
             }
+            if (BARRAGE_LONE_NIBBLER == 1 && !o.pillars.isEmpty()
+                    && InfernoNpcType.forNpcId(n.id) == InfernoNpcType.NIBBLER && !canHit(grid, o, me, n)) {
+                hits++;
+            }
             if (hits > bestHits) {
                 bestHits = hits;
                 best = n;
             }
         }
+        if (best != null && CLUMP_WAIT > 0 && nibblersStillGathering(o, bestHits)) {
+            return null;
+        }
         return best;
+    }
+
+    /**
+     * Whether nibblers are still walking in (some moved this tick, not all of them would be
+     * caught, and the oldest arrived less than {@link #CLUMP_WAIT} ticks ago).
+     */
+    private boolean nibblersStillGathering(InfernoObservation o, int hits) {
+        int nibblers = 0;
+        boolean moving = false;
+        int oldest = Integer.MAX_VALUE;
+        for (Npc n : o.npcs) {
+            if (InfernoNpcType.forNpcId(n.id) != InfernoNpcType.NIBBLER) {
+                continue;
+            }
+            nibblers++;
+            Tracker t = trackers.get(n.index);
+            if (t != null) {
+                moving |= t.moved;
+                oldest = Math.min(oldest, t.firstSeenTick);
+            }
+        }
+        return moving && hits < nibblers && o.tick - oldest < CLUMP_WAIT;
     }
 
     static boolean canBarrage(InfernoGrid grid, InfernoObservation o, WorldPoint from, Npc n) {
@@ -1284,7 +1402,8 @@ public final class InfernoBrain {
     // ------------------------------------------------------------------ supplies
 
     private void useSupplies(InfernoObservation o, List<String> actions) {
-        if (o.tick - lastUseTick < 2) {
+        // OSRS Wiki (Potions): a potion delays the next potion by 3 ticks.
+        if (o.tick - lastUseTick < 3) {
             return;
         }
         InfernoObservation.Item use = null;
