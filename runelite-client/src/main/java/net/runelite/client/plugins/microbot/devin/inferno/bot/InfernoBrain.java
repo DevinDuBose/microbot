@@ -267,6 +267,9 @@ public final class InfernoBrain {
 
         // Positioning first: prayer and target are evaluated for where we will stand.
         WorldPoint stand = choosePosition(o, grid, me);
+        if (DIAG_TRAP == 1) {
+            diagnoseTiles(o, grid, me, stand);
+        }
         if (DODGE == 1) {
             WorldPoint d = dodge(o, grid, occupied(grid, o), me, stand);
             if (d != null) {
@@ -542,6 +545,12 @@ public final class InfernoBrain {
             }
         }
         WorldPoint chosen = bestScore + MOVE_HYSTERESIS < currentScore ? best : me;
+        if (SAFESPOT == 1) {
+            WorldPoint safe = safespot(o, grid, occ, me, chosen);
+            if (safe != null) {
+                chosen = safe;
+            }
+        }
         if (!chosen.equals(me)) {
             committedTile = chosen;
             committedUntil = o.tick + COMMIT_TICKS;
@@ -841,6 +850,157 @@ public final class InfernoBrain {
             total += sum - max + unprotectable;
         }
         return total;
+    }
+
+    /**
+     * 1 = prefer a safespot: a tile within {@link #SAFESPOT_RADIUS} from which we can attack
+     * something while the look-ahead (monsters walking around pillars, attacking on their own
+     * timers) expects at least {@link #SAFESPOT_MARGIN} less damage over
+     * {@link #SAFESPOT_HORIZON} ticks than the chosen tile, counting the walk there. This is
+     * the wiki's pillar safespotting ("trap monsters behind the pillars to minimise the
+     * damage"), found from the live positions rather than a fixed tile list. Diagnostic run
+     * (waves 41-50): such a tile existed on 17% of ticks. Off: 12 runs of waves 1-66 gave 46.2
+     * avg waves vs 51.0 (bats and mager melee hit far more), so the look-ahead is not yet
+     * reliable enough to pick tiles on its own.
+     */
+    static final int SAFESPOT = tunableInt("SAFESPOT", 0);
+    static final int SAFESPOT_RADIUS = tunableInt("SAFESPOT_RADIUS", 10);
+    static final int SAFESPOT_HORIZON = tunableInt("SAFESPOT_HORIZON", 12);
+    static final double SAFESPOT_MARGIN = tunable("SAFESPOT_MARGIN", 5.0);
+
+    private WorldPoint safespot(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me, WorldPoint chosen) {
+        int[][] tree = pathTree(grid, me);
+        double chosenDmg = rolloutDamage(o, grid, occ, me, approachPlan(tree, me, chosen), false);
+        if (chosenDmg < SAFESPOT_MARGIN) {
+            return null;
+        }
+        WorldPoint best = null;
+        double bestDmg = chosenDmg - SAFESPOT_MARGIN;
+        for (int dx = -SAFESPOT_RADIUS; dx <= SAFESPOT_RADIUS; dx++) {
+            for (int dy = -SAFESPOT_RADIUS; dy <= SAFESPOT_RADIUS; dy++) {
+                WorldPoint t = me.dx(dx).dy(dy);
+                int sx = t.getX() - GRID_BASE_X;
+                int sy = t.getY() - GRID_BASE_Y;
+                if (t.equals(chosen) || !grid.isStandable(t) || sx < 0 || sy < 0 || sx >= occ.length || sy >= occ[0].length
+                        || occ[sx][sy] || !anyHittable(grid, o, t)) {
+                    continue;
+                }
+                WorldPoint[] plan = approachPlan(tree, me, t);
+                if (plan == null) {
+                    continue;
+                }
+                double d = rolloutDamage(o, grid, occ, me, plan, false);
+                if (d < bestDmg) {
+                    bestDmg = d;
+                    best = t;
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Our tiles over {@link #SAFESPOT_HORIZON} ticks running (two steps a tick) along the
+     * shortest path to {@code dest} and staying there; null if unreachable.
+     */
+    private static WorldPoint[] approachPlan(int[][] tree, WorldPoint me, WorldPoint dest) {
+        List<int[]> path = pathFromTree(tree, dest.getX() - me.getX(), dest.getY() - me.getY());
+        if (path == null) {
+            return null;
+        }
+        WorldPoint[] plan = new WorldPoint[SAFESPOT_HORIZON];
+        for (int s = 0; s < plan.length; s++) {
+            int i = Math.min(2 * (s + 1), path.size()) - 1;
+            plan[s] = i < 0 ? me : me.dx(path.get(i)[0]).dy(path.get(i)[1]);
+        }
+        return plan;
+    }
+
+    /**
+     * Breadth-first search tree from {@code from} (offsets within {@link #SEARCH_PAD}):
+     * tree[x][y] = encoded predecessor, -1 unreached. Same neighbour order and collision
+     * rules as {@link #stepToward}.
+     */
+    static int[][] pathTree(InfernoGrid grid, WorldPoint from) {
+        int n = SEARCH_PAD * 2 + 1;
+        int[][] prev = new int[n][n];
+        for (int[] row : prev) {
+            java.util.Arrays.fill(row, -1);
+        }
+        int ox = from.getX() - SEARCH_PAD;
+        int oy = from.getY() - SEARCH_PAD;
+        java.util.ArrayDeque<int[]> queue = new java.util.ArrayDeque<>();
+        prev[SEARCH_PAD][SEARCH_PAD] = SEARCH_PAD * n + SEARCH_PAD;
+        queue.add(new int[]{SEARCH_PAD, SEARCH_PAD});
+        InfernoGrid.TileFilter any = (x, y) -> true;
+        while (!queue.isEmpty()) {
+            int[] c = queue.poll();
+            int sx = c[0] + ox - grid.baseX();
+            int sy = c[1] + oy - grid.baseY();
+            for (int[] d : PATH_DIRS) {
+                int nx = c[0] + d[0];
+                int ny = c[1] + d[1];
+                if (nx < 0 || ny < 0 || nx >= n || ny >= n || prev[nx][ny] >= 0 || !grid.inScene(sx + d[0], sy + d[1])
+                        || !grid.canTravelInDirection(sx, sy, 1, 1, d[0], d[1], any)) {
+                    continue;
+                }
+                prev[nx][ny] = c[0] * n + c[1];
+                queue.add(new int[]{nx, ny});
+            }
+        }
+        return prev;
+    }
+
+    /** Path (offsets from the root, excluding it) to offset (dx, dy), or null if unreachable. */
+    private static List<int[]> pathFromTree(int[][] prev, int dx, int dy) {
+        int n = prev.length;
+        int cx = dx + SEARCH_PAD;
+        int cy = dy + SEARCH_PAD;
+        if (cx < 0 || cy < 0 || cx >= n || cy >= n || prev[cx][cy] < 0) {
+            return null;
+        }
+        List<int[]> path = new ArrayList<>();
+        while (cx != SEARCH_PAD || cy != SEARCH_PAD) {
+            path.add(0, new int[]{cx - SEARCH_PAD, cy - SEARCH_PAD});
+            int pv = prev[cx][cy];
+            cx = pv / n;
+            cy = pv % n;
+        }
+        return path;
+    }
+
+    /** Diagnostics: print, each tick, expected damage at the chosen tile vs the best nearby tile. */
+    static final int DIAG_TRAP = tunableInt("DIAG_TRAP", 0);
+
+    private void diagnoseTiles(InfernoObservation o, InfernoGrid grid, WorldPoint me, WorldPoint chosen) {
+        boolean[][] occ = occupied(grid, o);
+        int horizon = 12;
+        WorldPoint[] plan = new WorldPoint[horizon];
+        java.util.Arrays.fill(plan, chosen);
+        double chosenDmg = rolloutDamage(o, grid, occ, chosen, plan, false);
+        double best = chosenDmg;
+        WorldPoint bestTile = chosen;
+        boolean bestHits = anyHittable(grid, o, chosen);
+        for (int dx = -10; dx <= 10; dx++) {
+            for (int dy = -10; dy <= 10; dy++) {
+                WorldPoint t = me.dx(dx).dy(dy);
+                int sx = t.getX() - GRID_BASE_X;
+                int sy = t.getY() - GRID_BASE_Y;
+                if (!grid.isStandable(t) || sx < 0 || sy < 0 || sx >= occ.length || sy >= occ[0].length || occ[sx][sy]) {
+                    continue;
+                }
+                java.util.Arrays.fill(plan, t);
+                double d = rolloutDamage(o, grid, occ, t, plan, false);
+                if (d < best - 1e-9) {
+                    best = d;
+                    bestTile = t;
+                    bestHits = anyHittable(grid, o, t);
+                }
+            }
+        }
+        System.err.println("TRAPDIAG t" + o.tick + " w" + o.wave + " chosen " + chosen.getX() + "," + chosen.getY()
+                + " " + String.format("%.1f", chosenDmg) + " best " + bestTile.getX() + "," + bestTile.getY()
+                + " " + String.format("%.1f", best) + " canAttackFromBest " + bestHits + " npcs " + o.npcs.size());
     }
 
     // ------------------------------------------------------------------ dodging

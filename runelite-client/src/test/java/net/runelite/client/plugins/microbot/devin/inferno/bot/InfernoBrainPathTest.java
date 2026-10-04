@@ -69,4 +69,24 @@ public class InfernoBrainPathTest {
         InfernoGrid g = grid(f);
         assertEquals(p(55, 50), InfernoBrain.stepToward(g, p(50, 50), p(55, 50), 2));
     }
+
+    @Test
+    public void pathTreeReachesWhatStepTowardReaches() {
+        int[][] f = open();
+        for (int y = 45; y <= 55; y++) {
+            f[52][y] = SOLID;
+        }
+        for (int x = 53; x <= 57; x++) {
+            for (int y = 60; y <= 64; y++) {
+                f[x][y] = SOLID;
+            }
+        }
+        f[55][62] = 0; // enclosed pocket
+        InfernoGrid g = grid(f);
+        int[][] tree = InfernoBrain.pathTree(g, p(50, 50));
+        int pad = (tree.length - 1) / 2;
+        assertTrue("open tile behind the wall is reachable", tree[pad + 4][pad] >= 0);
+        assertEquals("enclosed pocket is unreachable", -1, tree[pad + 5][pad + 12]);
+        assertEquals("solid tile is unreachable", -1, tree[pad + 2][pad]);
+    }
 }
