@@ -126,8 +126,11 @@ public final class InfernoBrain {
     static final int CLUMP_WAIT = tunableInt("CLUMP_WAIT", 8);
     /** 1 = pray Melee against an adjacent blob (old behaviour); 0 = cover its scanned style. */
     static final int BLOB_ADJACENT_MELEE = tunableInt("BLOB_ADJACENT_MELEE", 0);
-    /** 1 = choose protection for the tile we will occupy next tick (0 = the destination). */
-    static final int PRAY_AT_NEXT_TILE = tunableInt("PRAY_AT_NEXT_TILE", 1);
+    /**
+     * Tile protection is chosen for: 2 = current tile (monsters move and attack before we
+     * move), 1 = where we will be after next tick's movement, 0 = the destination.
+     */
+    static final int PRAY_AT_NEXT_TILE = tunableInt("PRAY_AT_NEXT_TILE", 2);
     /**
      * 1 = a nibbler the crossbow cannot reach from here is worth a barrage even alone (it
      * otherwise eats a pillar while we fight elsewhere; measured: lone nibblers out of range
@@ -248,9 +251,10 @@ public final class InfernoBrain {
             movingTicks = 0;
         }
 
-        // Prayer covers the tick ahead, so it is chosen for where we will be then (two run
-        // steps along the path), not for the destination.
-        WorldPoint next = PRAY_AT_NEXT_TILE == 1 ? stepToward(grid, me, stand, 2) : stand;
+        // Prayer covers the tick ahead. NPCs take their turn before players each tick (OSRS
+        // Wiki, Hit delay: client input, then NPCs, then players), so a monster attacking next
+        // tick still sees us on our current tile.
+        WorldPoint next = PRAY_AT_NEXT_TILE == 2 ? me : PRAY_AT_NEXT_TILE == 1 ? stepToward(grid, me, stand, 2) : stand;
         choosePrayers(o, grid, next, actions);
         useSupplies(o, actions);
         if (stand.equals(me)) {
