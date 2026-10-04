@@ -215,6 +215,8 @@ public final class InfernoBrain {
         committedUntil = -1;
         lastDodgeTick = -100;
         dodgeStreak = 0;
+        expectedKills.clear();
+        pendingCastTarget = -1;
     }
 
     public List<String> decide(InfernoObservation o) {
@@ -662,7 +664,7 @@ public final class InfernoBrain {
     private double rolloutDamagePerTick(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint t) {
         WorldPoint[] plan = new WorldPoint[ROLLOUT_TICKS];
         java.util.Arrays.fill(plan, t);
-        return rolloutDamage(o, grid, occ, t, plan) / ROLLOUT_TICKS;
+        return rolloutDamage(o, grid, occ, t, plan, false) / ROLLOUT_TICKS;
     }
 
     /**
@@ -671,7 +673,8 @@ public final class InfernoBrain {
      * before us each tick (OSRS Wiki, Hit delay), so on each tick they move toward, and attack,
      * the tile we ended the previous tick on.
      */
-    private double rolloutDamage(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint start, WorldPoint[] plan) {
+    private double rolloutDamage(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint start, WorldPoint[] plan,
+            boolean knownTimersOnly) {
         List<Sim> sims = new ArrayList<>();
         for (Npc n : o.npcs) {
             InfernoNpcType type = InfernoNpcType.forNpcId(n.id);
@@ -679,7 +682,11 @@ public final class InfernoBrain {
             if (type == null || !type.isThreat() || type.getProtectPriority() == 0 || (tr != null && tr.burrowed)) {
                 continue;
             }
-            int next = tr == null || tr.nextAttackTick < 0 ? o.tick + 1 : Math.max(tr.nextAttackTick, o.tick + 1);
+            boolean unknown = tr == null || tr.nextAttackTick < 0;
+            if (unknown && knownTimersOnly) {
+                continue;
+            }
+            int next = unknown ? o.tick + 1 : Math.max(tr.nextAttackTick, o.tick + 1);
             sims.add(new Sim(type, area(n), next));
         }
         if (sims.isEmpty()) {
@@ -737,6 +744,8 @@ public final class InfernoBrain {
     static final double DODGE_MARGIN = tunable("DODGE_MARGIN", 3.0);
     /** Look-ahead length for comparing dodges, in ticks. */
     static final int DODGE_HORIZON = tunableInt("DODGE_HORIZON", 8);
+    /** Damage-equivalent cost of delaying our own attack by dodging. */
+    static final double DODGE_ATTACK_COST = tunable("DODGE_ATTACK_COST", 4.0);
 
     /**
      * Tile to step to instead of heading for {@code chosen}, or null. A dodge is a tile we
@@ -749,11 +758,13 @@ public final class InfernoBrain {
         if (o.tick - lastDodgeTick == 1 ? dodgeStreak >= DODGE_MAX_STREAK : o.tick - lastDodgeTick <= DODGE_COOLDOWN) {
             return null;
         }
+        // Only monsters whose attack timing we have seen: guessing collisions makes us dodge
+        // for nothing, and every dodge interrupts our own attack.
         WorldPoint[] basePlan = walkPlan(grid, me, null, 0, chosen);
-        if (rolloutDamage(o, grid, occ, me, java.util.Arrays.copyOf(basePlan, 3)) <= DODGE_MARGIN) {
+        if (rolloutDamage(o, grid, occ, me, java.util.Arrays.copyOf(basePlan, 3), true) <= DODGE_MARGIN) {
             return null;
         }
-        double baseline = rolloutDamage(o, grid, occ, me, basePlan);
+        double baseline = rolloutDamage(o, grid, occ, me, basePlan, true);
         WorldPoint best = null;
         double bestDamage = baseline - DODGE_MARGIN;
         for (int dx = -2; dx <= 2; dx++) {
@@ -768,7 +779,10 @@ public final class InfernoBrain {
                     continue;
                 }
                 for (int hold = 1; hold <= 2; hold++) {
-                    double d = rolloutDamage(o, grid, occ, me, walkPlan(grid, me, h, hold, chosen));
+                    double d = rolloutDamage(o, grid, occ, me, walkPlan(grid, me, h, hold, chosen), true);
+                    if (!h.equals(me) && o.attackCooldown <= hold + 1) {
+                        d += DODGE_ATTACK_COST; // moving cancels the attack we were about to make
+                    }
                     if (d < bestDamage) {
                         bestDamage = d;
                         best = h;
@@ -1277,7 +1291,7 @@ public final class InfernoBrain {
             if (type == null || type == InfernoNpcType.ZUK) {
                 continue;
             }
-            if (grid != null && !canHit(grid, o, from, n)) {
+            if (grid != null && (!canHit(grid, o, from, n) || expectedDead(n, o))) {
                 continue;
             }
             int key = killPriority(n, type, pillarsUp) * 1000
@@ -1401,7 +1415,7 @@ public final class InfernoBrain {
         Npc best = null;
         int bestHits = anyHittable(grid, o, me) ? 1 : 0;
         for (Npc n : o.npcs) {
-            if (!isBarrageFodder(n)) {
+            if (!isBarrageFodder(n) || expectedDead(n, o)) {
                 continue;
             }
             WorldArea a = area(n);
@@ -1410,7 +1424,7 @@ public final class InfernoBrain {
             }
             int hits = 0;
             for (Npc m : o.npcs) {
-                if (isBarrageFodder(m) && Math.abs(m.x - n.x) <= 1 && Math.abs(m.y - n.y) <= 1) {
+                if (isBarrageFodder(m) && !expectedDead(m, o) && Math.abs(m.x - n.x) <= 1 && Math.abs(m.y - n.y) <= 1) {
                     hits++;
                 }
             }
@@ -1451,6 +1465,73 @@ public final class InfernoBrain {
         return moving && hits < nibblers && o.tick - oldest < CLUMP_WAIT;
     }
 
+    /**
+     * NPC index -> last tick of a hit we expect to kill it. OSRS Wiki (Hit delay): the hit
+     * lands some ticks after the attack (magic 1 + (1 + distance) / 3, crossbows
+     * 1 + (3 + distance) / 6, blowpipe 1 + distance / 6; one more on NPCs, which act first), so
+     * until then its health bar still looks full. Targeting it again meanwhile wastes an
+     * attack (barrage: five ticks) on a monster that is about to die.
+     */
+    private final Map<Integer, Integer> expectedKills = new HashMap<>();
+
+    /** Index of the barrage target while a cast is queued, else -1. */
+    private int pendingCastTarget = -1;
+
+    /**
+     * Our attack timer just restarted, so an attack launched last tick. A barrage hits the
+     * 3x3 around its target; a ranged hit on a fragile monster kills it. Counted only once
+     * launched: an order still waiting on the timer can be overridden.
+     */
+    private void recordFiredAttack(InfernoObservation o, WorldPoint me) {
+        int launched = o.tick - 1;
+        if (pendingCastTarget >= 0) {
+            Npc clump = npcByIndex(o, pendingCastTarget);
+            pendingCastTarget = -1;
+            if (clump != null) {
+                for (Npc m : o.npcs) {
+                    if (isBarrageFodder(m) && Math.abs(m.x - clump.x) <= 1 && Math.abs(m.y - clump.y) <= 1) {
+                        expectKill(m, launched + magicHitDelay(me, m));
+                    }
+                }
+            }
+            return;
+        }
+        Npc target = npcByIndex(o, o.targetIndex);
+        if (target != null && isFragile(target)) {
+            int dist = area(target).distanceTo(me);
+            boolean blowpipe = o.worn.contains(RangedWeapon.TOXIC_BLOWPIPE.name());
+            int delay = blowpipe ? 1 + dist / 6 : 1 + (3 + dist) / 6;
+            expectKill(target, launched + delay + 1);
+        }
+    }
+
+    private static Npc npcByIndex(InfernoObservation o, int index) {
+        for (Npc n : o.npcs) {
+            if (n.index == index) {
+                return n;
+            }
+        }
+        return null;
+    }
+
+    private void expectKill(Npc n, int untilTick) {
+        expectedKills.merge(n.index, untilTick, Math::max);
+    }
+
+    private boolean expectedDead(Npc n, InfernoObservation o) {
+        Integer until = expectedKills.get(n.index);
+        return EXPECT_KILLS == 1 && until != null && o.tick <= until;
+    }
+
+    /** Barrage hit delay, measured from the target's south-west tile, plus the NPC tick. */
+    private static int magicHitDelay(WorldPoint me, Npc n) {
+        int dist = Math.max(Math.abs(n.x - me.getX()), Math.abs(n.y - me.getY()));
+        return 1 + (1 + dist) / 3 + 1;
+    }
+
+    /** 1 = skip targets an attack already in flight should kill. */
+    static final int EXPECT_KILLS = tunableInt("EXPECT_KILLS", 1);
+
     static boolean canBarrage(InfernoGrid grid, InfernoObservation o, WorldPoint from, Npc n) {
         WorldArea a = area(n);
         return o.spells.contains("ICE_BARRAGE") && a.distanceTo(from) <= BARRAGE_RANGE
@@ -1471,10 +1552,14 @@ public final class InfernoBrain {
         // cancels it. The cast has fired once the timer jumps back up.
         boolean castFired = o.attackCooldown > lastCooldown;
         lastCooldown = o.attackCooldown;
+        if (castFired) {
+            recordFiredAttack(o, me);
+        }
         if (pendingCastTick >= 0 && !castFired && o.tick - pendingCastTick < CAST_TIMEOUT) {
             return;
         }
         pendingCastTick = -1;
+        pendingCastTarget = -1; // fired (already recorded) or abandoned
         Npc clump = barrageTarget(o, grid, me);
         if (clump != null && o.attackCooldown <= 1) {
             wear(o, "ANCIENT_SCEPTRE", actions);
@@ -1483,6 +1568,7 @@ public final class InfernoBrain {
                 wear(o, "AHRIMS_ROBESKIRT", actions);
             }
             actions.add("CAST ICE_BARRAGE " + clump.index);
+            pendingCastTarget = clump.index;
             pendingCastTick = o.tick;
             return;
         }
