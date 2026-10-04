@@ -805,7 +805,10 @@ public final class InfernoBrain {
      * us here and a corner tile within reach leaves fewer, trapping (by the verified movement
      * rules) a monster on the right side; higher-priority trapped monsters break ties.
      */
-    static final int CORNER_TRAP = tunableInt("CORNER_TRAP", 1);
+    // Off until checked in the live game: in the simulator it measured worse (12 runs of waves
+    // 1-66: 49.6 avg waves vs 52.9; more meleer damage), and the simulator's NPC stepping
+    // differs from the live-observed rules in 5-12% of moves, i.e. exactly around corners.
+    static final int CORNER_TRAP = tunableInt("CORNER_TRAP", 0);
     static final int CORNER_TRAP_RADIUS = 8;
     /** Ticks to reach a picked corner before giving up on it, and how long it is then skipped. */
     static final int CORNER_REACH_TICKS = 6;
