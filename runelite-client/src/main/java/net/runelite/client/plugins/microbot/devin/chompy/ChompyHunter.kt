@@ -1,4 +1,4 @@
-package net.runelite.client.plugins.microbot.trent.chompy
+package net.runelite.client.plugins.microbot.devin.chompy
 
 import com.google.inject.Provides
 import kotlinx.coroutines.DelicateCoroutinesApi
@@ -30,7 +30,7 @@ import javax.inject.Inject
 
 @ConfigGroup(ChompyHunterConfig.GROUP)
 interface ChompyHunterConfig : Config {
-    companion object { const val GROUP = "trentChompyHunter" }
+    companion object { const val GROUP = "devinChompyHunter" }
 
     @ConfigItem(keyName = "targetGroundToads", name = "Target ground toads",
         description = "Keep at least this many bloated toads on the ground as bait. Default 6.",
