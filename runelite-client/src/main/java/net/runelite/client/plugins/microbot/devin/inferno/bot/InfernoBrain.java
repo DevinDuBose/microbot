@@ -343,7 +343,14 @@ public final class InfernoBrain {
                 dps = 0.5 * Math.max(dps, meleeDps);
             }
             Tracker tr = trackers.get(n.index);
-            int next = tr != null && tr.nextAttackTick > o.tick ? tr.nextAttackTick : -1;
+            // A monster whose attack is overdue (it could not see us) attacks as soon as it can:
+            // on the next tick if it can reach this tile. Its old schedule no longer applies.
+            int next;
+            if (tr == null || tr.nextAttackTick < 0) {
+                next = -1;
+            } else {
+                next = tr.nextAttackTick > o.tick ? tr.nextAttackTick : o.tick + 1;
+            }
             threats.add(new Threat(type.getDefaultStyle(), dps, type.getProtectPriority(),
                     attackSpeed(type, o.wave), next));
         }
