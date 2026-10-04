@@ -8,6 +8,7 @@ import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.api.IEntity;
 import net.runelite.client.plugins.microbot.util.camera.Rs2Camera;
+import net.runelite.client.plugins.microbot.util.menu.NewMenuEntry;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.reflection.Rs2Reflection;
 
@@ -137,7 +138,7 @@ public class Rs2TileItemModel implements TileItem, IEntity {
         return Microbot.getClientThread().invoke((Supplier<Boolean>) () -> {
             ItemComposition itemComposition = Microbot.getClient().getItemDefinition(tileItem.getId());
             int highAlchValue = itemComposition.getPrice() * 60 / 100;
-            int marketPrice = Microbot.getItemManager().getItemPrice(itemComposition.getId());
+            long marketPrice = Microbot.getItemManager().getItemPrice(itemComposition.getId());
             return marketPrice > highAlchValue;
         });
     }
@@ -181,10 +182,10 @@ public class Rs2TileItemModel implements TileItem, IEntity {
         });
     }
 
-    public int getTotalValue() {
+    public long getTotalValue() {
         return Microbot.getClientThread().invoke(() -> {
             ItemComposition itemComposition = Microbot.getClient().getItemDefinition(tileItem.getId());
-            int price = Microbot.getItemManager().getItemPrice(itemComposition.getId());
+            long price = Microbot.getItemManager().getItemPrice(itemComposition.getId());
             return price * tileItem.getQuantity();
         });
     }
@@ -203,6 +204,7 @@ public class Rs2TileItemModel implements TileItem, IEntity {
     }
 
     public boolean click(String action) {
+        if (action == null) return false;
         try {
             int param0;
             int param1;
@@ -222,7 +224,13 @@ public class Rs2TileItemModel implements TileItem, IEntity {
             target = "<col=ff9040>" + getName();
             param1 = localPoint.getSceneY();
 
-            String[] groundActions = Rs2Reflection.getGroundItemActions(item);
+            // Take is the protocol's third ground-item option. Only custom actions
+            // need discovery from the obfuscated item definition.
+            boolean pickup = action.equalsIgnoreCase("Take");
+            String[] groundActions = pickup
+                    ? new String[]{null, null, "Take"}
+                    : Microbot.getClientThread().runOnClientThreadOptional(
+                            () -> Rs2Reflection.getGroundItemActions(item)).orElse(new String[0]);
 
             int index = -1;
             if (action.isEmpty()) {
@@ -234,7 +242,6 @@ public class Rs2TileItemModel implements TileItem, IEntity {
                     index = i;
                     break;
                 }
-                if (index == -1) return false;
             } else {
                 for (int i = 0; i < groundActions.length; i++) {
                     String groundAction = groundActions[i];
@@ -244,7 +251,10 @@ public class Rs2TileItemModel implements TileItem, IEntity {
                 }
             }
 
-            if (Microbot.getClient().isWidgetSelected()) {
+            if (index == -1) return false;
+
+            if (!pickup && Microbot.getClientThread().runOnClientThreadOptional(
+                    () -> Microbot.getClient().isWidgetSelected()).orElse(false)) {
                 menuAction = MenuAction.WIDGET_TARGET_ON_GROUND_ITEM;
             } else {
                 menuAction = groundItemMenuAction(index);
@@ -264,33 +274,17 @@ public class Rs2TileItemModel implements TileItem, IEntity {
             Rectangle bounds = canvas == null
                     ? new Rectangle(1, 1, Microbot.getClient().getCanvasWidth(), Microbot.getClient().getCanvasHeight())
                     : canvas.getBounds();
-            MenuAction selectedMenuAction = menuAction;
-            String selectedAction = action;
             int worldViewId = localPoint1.getWorldView();
-            Microbot.getClientThread().runOnClientThreadOptional(() -> {
-                MenuEntry entry = Microbot.getClient().getMenu().createMenuEntry(-1)
-                        .setOption(selectedAction)
-                        .setTarget(target)
-                        .setIdentifier(identifier)
-                        .setType(selectedMenuAction)
-                        .setParam0(param0)
-                        .setParam1(param1)
-                        .setItemId(-1)
-                        .setWorldViewId(worldViewId);
-                Microbot.getClient().setMenuEntries(new MenuEntry[]{entry});
-                return true;
-            });
-            Rs2Reflection.invokeMenu(
-                    param0,
-                    param1,
-                    menuAction.getId(),
-                    identifier,
-                    -1,
-                    worldViewId,
-                    action,
-                    target,
-                    (int) bounds.getCenterX(),
-                    (int) bounds.getCenterY());
+            Microbot.doInvoke(new NewMenuEntry()
+                            .option(action)
+                            .target(target)
+                            .identifier(identifier)
+                            .opcode(menuAction.getId())
+                            .param0(param0)
+                            .param1(param1)
+                            .itemId(-1)
+                            .worldViewId(worldViewId),
+                    bounds);
             return true;
         } catch (Exception ex) {
             Microbot.logStackTrace("Rs2TileItemModel", ex);

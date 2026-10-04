@@ -11,18 +11,24 @@ import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.plugins.itemcharges.ItemChargeConfig;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.shortestpath.*;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionOverlay;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionSnapshot;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionView;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.policy.TransportRequirementPolicy;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
+import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Magic;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Spells;
 import net.runelite.client.plugins.microbot.util.magic.RuneFilter;
+import net.runelite.client.plugins.microbot.util.magic.Runes;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.leaguetransport.Rs2LeaguesTransport;
-import net.runelite.client.plugins.microbot.util.poh.PohTeleports;
+import net.runelite.client.plugins.microbot.util.poh.PohPresence;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.microbot.util.walker.WebWalkLog;
+import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -75,12 +81,25 @@ public class PathfinderConfig {
     private final SplitFlagMap mapData;
     private final ThreadLocal<CollisionMap> map;
     /**
+     * One shared overlay behind every per-thread {@link CollisionMap}, so the client thread can swap in a
+     * fresh live snapshot that all pathfinding threads pick up. Disabled until the
+     * {@code useLiveCollision} config flag turns it on.
+     */
+    @Getter
+    private final LiveCollisionOverlay liveCollisionOverlay = new LiveCollisionOverlay();
+    /**
      * All transports by origin {@link WorldPoint}. The null key is used for transports centered on the player.
      */
     @Getter
     private final Map<WorldPoint, Set<Transport>> allTransports;
     @Setter
     private volatile Set<Transport> usableTeleports;
+
+	/** Immutable exact-object snapshot for planner adapters after transport admission has run. */
+	public Set<Transport> getUsableTeleportsSnapshot() {
+		Set<Transport> current = usableTeleports;
+		return current == null ? Collections.emptySet() : Set.copyOf(current);
+	}
     private final List<WorldPoint> filteredTargets = new CopyOnWriteArrayList<>();
 
     @Getter
@@ -91,8 +110,17 @@ public class PathfinderConfig {
     @Getter
     private final Set<Long> blockedTransportEdgesPacked;
 
+    /**
+     * Runtime-learned blocked walking edges (packed keys), persisted to a human-editable TSV. Held
+     * separately from {@link #blockedTransportEdgesPacked} because {@link #refreshTransports} clears and
+     * rebuilds that set from static data on every refresh — learned edges are re-applied from here so
+     * they survive. Loaded once in the constructor; grown by {@link #learnBlockedEdge}.
+     */
+    private final Set<Long> learnedBlockedEdgeKeys = ConcurrentHashMap.newKeySet();
+
     private final Client client;
     private final ShortestPathConfig config;
+    private final TransportPlanningPolicy transportPlanningPolicy;
 
     private final List<QuestState> questStateOrder = Arrays.asList(
             QuestState.NOT_STARTED,
@@ -102,10 +130,30 @@ public class PathfinderConfig {
 
     @Getter
     private volatile long calculationCutoffMillis;
+
+    /**
+     * A {@link #refresh(WorldPoint)} slower than this is a user-visible cold start: the walker sits
+     * on a null pathfinder for its whole duration before the first click can be issued.
+     */
+    private static final long SLOW_REFRESH_LOG_THRESHOLD_MS = 500L;
+
+    /**
+     * Inventory/equipment/bank fingerprint from the most recent cache-key computation, and the value
+     * carried over from the previous refresh. The fingerprint hashes item <em>quantity</em>, so
+     * spending coins (a charter ship fare, a toll gate) changes it and invalidates the transport
+     * cache key — forcing a full re-evaluation of every transport. Tracked so a cache miss can say
+     * whether the items changed or the game state did.
+     */
+    private volatile int lastComputedInvFingerprint;
+    private volatile int previousRefreshInvFingerprint;
+    /** Which verification component moved on the most recent verify-miss; see the miss log. */
+    private volatile String lastVerifyMissDetail = "";
     @Getter
     private volatile boolean avoidWilderness;
     @Getter
     private volatile boolean avoidDangerousNpcs;
+	@Getter
+	private volatile PlannerSelectionMode plannerSelectionMode = PlannerSelectionMode.LOCAL;
     @Getter
     private volatile boolean useSpiritTrees;
     private volatile boolean useAgilityShortcuts,
@@ -118,6 +166,7 @@ public class PathfinderConfig {
             useGnomeGliders,
             useMinecarts,
             usePoh,
+            usePortalNexus,
             useQuetzals,
             useTeleportationLevers,
             useTeleportationMinigames,
@@ -157,22 +206,73 @@ public class PathfinderConfig {
     // Used to include bank items when searching for item requirements
     private volatile boolean useBankItems = false;
 
-    private Set<Integer> refreshAvailableItemIds;
+    private Map<Integer, Integer> refreshAvailableItemQuantities;
+    private Map<Integer, Integer> refreshAvailableRuneQuantities;
     private int[] refreshBoostedLevels;
     private Map<String, int[]> refreshCurrencyCache;
+    // Varplayer values snapshot for the current refreshTransports pass. Without it, every varp
+    // condition on every transport paid a full cross-thread hop (getLiveVarplayerValue), and the
+    // global state cache never retains zero-valued varps — ~115 varp-gated rows accounted for
+    // ~2.3s of the 2.8s refilter. Captured in the same client-thread block as boosted levels.
+    private Map<Integer, Integer> refreshVarplayerValues;
     private static final Skill[] SKILLS = Skill.values();
 
     /**
-     * Memo of last {@link #refreshTransports} result when {@link #computeTransportRefreshCacheKeyHash} and
-     * verification (boosted skills + transport varbits/varplayers) match. Cleared by {@link #invalidateTransportRefreshCache()}.
+     * Memo of recent {@link #refreshTransports} results, keyed by {@link #computeTransportRefreshCacheKeyHash}
+     * and guarded by the verification hash (boosted skills + transport varbits/varplayers). BOUNDED and
+     * multi-entry: the banked-walk compare alternates between two config states (bank-leg vs direct), so a
+     * single-slot memo missed on EVERY flip and each miss was a full ~2.5s re-filter of all 12k transports —
+     * four in a row per banked walk start. A tiny LRU keeps both states (plus a couple more) warm.
+     * Cleared by {@link #invalidateTransportRefreshCache()}.
      */
-    private volatile TransportRefreshSnapshot transportRefreshSnapshot;
+    private static final int TRANSPORT_REFRESH_SNAPSHOT_CACHE_SIZE = 4;
+
+    /**
+     * Item ids and currency names that some transport or restriction actually gates on. Only these may
+     * participate in the transport-refresh cache key — see
+     * {@link #itemAffectsTransportUsability(int, String, Set, Set)}. Null until the first refresh has
+     * run, which makes the fingerprint fall back to hashing everything.
+     */
+    private volatile Set<Integer> transportRelevantItemIds = null;
+    private volatile boolean transportRelevantItemIdsInitialized;
+
+    /**
+     * The item ids usability depends on that are NOT declared on any transport row: the fairy-ring
+     * staves and the Chronicle are checked against hardcoded ids, so they must be seeded explicitly or
+     * picking one up would not invalidate the cache.
+     */
+    private static final Set<Integer> HARDCODED_USABILITY_ITEM_IDS = Collections.unmodifiableSet(
+            new HashSet<>(Arrays.asList(
+                    ItemID.DRAMEN_STAFF,
+                    ItemID.LUNAR_MOONCLAN_LIMINAL_STAFF,
+                    ItemID.CHRONICLE)));
+    private final Map<Integer, TransportRefreshSnapshot> transportRefreshSnapshots =
+            Collections.synchronizedMap(new java.util.LinkedHashMap<Integer, TransportRefreshSnapshot>(8, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<Integer, TransportRefreshSnapshot> eldest) {
+                    return size() > TRANSPORT_REFRESH_SNAPSHOT_CACHE_SIZE;
+                }
+            });
 
     public PathfinderConfig(SplitFlagMap mapData, Map<WorldPoint, Set<Transport>> transports,
                             List<Restriction> restrictions,
                             Client client, ShortestPathConfig config) {
+        this(mapData, transports, restrictions, client, config, TransportPlanningPolicy.ALLOW_ALL);
+    }
+
+    /**
+     * Creates pathfinder state. Null client/config dependencies are supported for offline planning
+     * and tests. A null client uses only static collision data, and refresh returns without reading
+     * live state when either dependency is absent.
+     */
+    public PathfinderConfig(SplitFlagMap mapData, Map<WorldPoint, Set<Transport>> transports,
+                            List<Restriction> restrictions,
+                            Client client, ShortestPathConfig config,
+                            TransportPlanningPolicy transportPlanningPolicy) {
         this.mapData = mapData;
-        this.map = ThreadLocal.withInitial(() -> new CollisionMap(this.mapData));
+        this.map = ThreadLocal.withInitial(() -> client == null
+                ? new CollisionMap(this.mapData, this.liveCollisionOverlay, () -> -1)
+                : new CollisionMap(this.mapData, this.liveCollisionOverlay));
         this.allTransports = Collections.synchronizedMap(new HashMap<>());
         replaceAllTransports(transports);
         this.usableTeleports = ConcurrentHashMap.newKeySet(allTransports.size() / 20);
@@ -182,6 +282,8 @@ public class PathfinderConfig {
         addStaticBlockedEdges();
         this.client = client;
         this.config = config;
+        this.transportPlanningPolicy = Objects.requireNonNull(
+                transportPlanningPolicy, "transportPlanningPolicy");
         //START microbot variables
         this.resourceRestrictions = restrictions;
         this.customRestrictions = Collections.emptyList();
@@ -194,10 +296,64 @@ public class PathfinderConfig {
         return map.get();
     }
 
+    /**
+     * Diagnostics for the live-collision overlay at one tile, for the agent server's
+     * {@code /live-collision} endpoint. Reads only immutable data (the static map and the pinned
+     * snapshot), so it is safe to call from any thread.
+     * <p>
+     * {@code overlayRaw} is the snapshot's own answer ({@code true}/{@code false}/{@code null} where
+     * {@code null} means "unknown, defer to static") — proving capture and the flag translation.
+     * {@code resolved} is what the pathfinder actually uses (overlay where known, else static), and
+     * {@code static} is the static-only reading. Where they differ, the overlay is changing routing.
+     */
+    public Map<String, Object> liveCollisionDiagnostics(int x, int y, int z) {
+        final Map<String, Object> out = new LinkedHashMap<>();
+        out.put("enabled", liveCollisionOverlay.isEnabled());
+
+        final LiveCollisionView view = liveCollisionOverlay.current();
+        out.put("snapshotPresent", view != null);
+        if (view != null) {
+            out.put("regionCount", view.regionCount());
+        }
+        out.put("tile", Map.of("x", x, "y", y, "plane", z));
+
+        final CollisionMap staticMap = new CollisionMap(mapData);
+        final CollisionMap resolvedMap = new CollisionMap(mapData, liveCollisionOverlay);
+        resolvedMap.beginSearch();
+        out.put("static", edgeReadout(staticMap, x, y, z));
+        out.put("resolved", edgeReadout(resolvedMap, x, y, z));
+
+        if (view != null) {
+            final Map<String, Object> raw = new LinkedHashMap<>();
+            raw.put("n", view.edge(x, y, z, LiveCollisionSnapshot.FLAG_NORTH));
+            raw.put("e", view.edge(x, y, z, LiveCollisionSnapshot.FLAG_EAST));
+            raw.put("s", view.edge(x, y - 1, z, LiveCollisionSnapshot.FLAG_NORTH));
+            raw.put("w", view.edge(x - 1, y, z, LiveCollisionSnapshot.FLAG_EAST));
+            out.put("overlayRaw", raw);
+        }
+        return out;
+    }
+
+    private static Map<String, Object> edgeReadout(CollisionMap m, int x, int y, int z) {
+        final Map<String, Object> e = new LinkedHashMap<>();
+        e.put("n", m.n(x, y, z));
+        e.put("e", m.e(x, y, z));
+        e.put("s", m.s(x, y, z));
+        e.put("w", m.w(x, y, z));
+        e.put("blocked", m.isBlocked(x, y, z));
+        e.put("hasRegion", m.hasRegion(x, y));
+        return e;
+    }
+
     public void refresh(WorldPoint target) {
+        if (client == null || config == null) {
+            return;
+        }
         calculationCutoffMillis = (long) config.calculationCutoff() * Constants.GAME_TICK_LENGTH;
         avoidWilderness = ShortestPathPlugin.override("avoidWilderness", config.avoidWilderness());
         avoidDangerousNpcs = ShortestPathPlugin.override("avoidDangerousNpcs", config.avoidDangerousNpcs());
+		plannerSelectionMode = ShortestPathPlugin.override(
+			"plannerSelectionMode", config.plannerSelectionMode());
         useAgilityShortcuts = ShortestPathPlugin.override("useAgilityShortcuts", config.useAgilityShortcuts());
         useGrappleShortcuts = ShortestPathPlugin.override("useGrappleShortcuts", config.useGrappleShortcuts());
         useBoats = ShortestPathPlugin.override("useBoats", config.useBoats());
@@ -206,6 +362,7 @@ public class PathfinderConfig {
         useShips = ShortestPathPlugin.override("useShips", config.useShips());
         useMinecarts = ShortestPathPlugin.override("useMinecarts", config.useMinecarts());
         usePoh = ShortestPathPlugin.override("usePoh", config.usePoh());
+        usePortalNexus = ShortestPathPlugin.override("usePortalNexus", config.usePortalNexus());
         useSpiritTreeEtceteria = ShortestPathPlugin.override("spiritTreeEtceteria", config.spiritTreeEtceteria());
         useSpiritTreeBrimhaven = ShortestPathPlugin.override("spiritTreeBrimhaven", config.spiritTreeBrimhaven());
         useSpiritTreePortSarim = ShortestPathPlugin.override("spiritTreePortSarim", config.spiritTreePortSarim());
@@ -229,7 +386,8 @@ public class PathfinderConfig {
 
         if (GameState.LOGGED_IN.equals(client.getGameState())) {
             long t0 = System.currentTimeMillis();
-            refreshTransports(target);
+            boolean inCombat = Rs2Player.isInCombat();
+            refreshTransports(target, inCombat);
             long t1 = System.currentTimeMillis();
             //START microbot variables
             refreshRestrictionData();
@@ -240,6 +398,13 @@ public class PathfinderConfig {
 
             WebWalkLog.cfg("refresh transports={}ms restr={}ms total={}ms",
                     t1 - t0, t2 - t1, t2 - t0);
+            // The walker blocks on a null pathfinder for the whole of refresh(), so a slow refresh
+            // is a visible cold start at route start. Surface it at INFO (not DEBUG) when it is
+            // actually slow, so it shows up in normal logs without enabling debug logging.
+            if (t2 - t0 >= SLOW_REFRESH_LOG_THRESHOLD_MS) {
+                WebWalkLog.cfgSlow("slow refresh transports={}ms restr={}ms total={}ms",
+                        t1 - t0, t2 - t1, t2 - t0);
+            }
             //END microbot variables
         }
     }
@@ -302,7 +467,13 @@ public class PathfinderConfig {
      *
      * @param target Optional target destination for optimized filtering (null for standard filtering)
      */
-    private void refreshTransports(WorldPoint target) {
+    private void refreshTransports(WorldPoint target, boolean inCombat) {
+        // The 1.1s post-login client-thread freeze hid in the UNMEASURED parts of this method: the
+        // stage timers summed to ~30ms while the outer wrapper read 1154ms, and the slow-stage log
+        // never fired. Three regions were dark: this entry block (quest-state + bank/item gates),
+        // the cache-key phase, and the verify/capture block after filtering. Each now has a timer,
+        // carried on both the stage log and the slow log, so the next slow login names its stage.
+        long entryStart = System.currentTimeMillis();
         useFairyRings = ShortestPathPlugin.override("useFairyRings", config.useFairyRings())
                 && !QuestState.NOT_STARTED.equals(Rs2Player.getQuestState(Quest.FAIRYTALE_II__CURE_A_QUEEN))
                 && (Rs2Inventory.contains(ItemID.DRAMEN_STAFF, ItemID.LUNAR_MOONCLAN_LIMINAL_STAFF)
@@ -316,70 +487,180 @@ public class PathfinderConfig {
         useQuetzals = ShortestPathPlugin.override("useQuetzals", config.useQuetzals())
                 && QuestState.FINISHED.equals(Rs2Player.getQuestState(Quest.TWILIGHTS_PROMISE));
 
-        final Rs2LeaguesTransport.LeaguesContext leaguesCtx = Rs2LeaguesTransport.leaguesContext();
-        final int refreshCacheKeyHash = computeTransportRefreshCacheKeyHash(target, leaguesCtx);
+        long entryTime = System.currentTimeMillis() - entryStart;
 
-        TransportRefreshSnapshot snap = transportRefreshSnapshot;
-        if (snap != null && snap.cacheKeyHash == refreshCacheKeyHash && client != null) {
-            int[] boostedProbe = new int[SKILLS.length];
+        // Build the item filter before the first key. Otherwise the cold snapshot is keyed with
+        // every item, then the next identical refresh uses the narrowed filter and misses again.
+        long bootstrapStart = System.currentTimeMillis();
+        long bootstrapMergeTime = 0;
+        Map<WorldPoint, Set<Transport>> bootstrapMergedList = null;
+        if (!transportRelevantItemIdsInitialized) {
+            bootstrapMergedList = createMergedList();
+            bootstrapMergeTime = System.currentTimeMillis() - bootstrapStart;
+            transportRelevantItemIds = collectTransportRelevantItemState(bootstrapMergedList);
+            transportRelevantItemIdsInitialized = true;
+        }
+        long bootstrapTime = System.currentTimeMillis() - bootstrapStart;
+
+        long keyStart = System.currentTimeMillis();
+        final Rs2LeaguesTransport.LeaguesContext leaguesCtx = Rs2LeaguesTransport.leaguesContext();
+        lastKeyLeaguesMs = System.currentTimeMillis() - keyStart;
+        int refreshCacheKeyHash = computeTransportRefreshCacheKeyHash(target, leaguesCtx, inCombat);
+        long keyTime = System.currentTimeMillis() - keyStart;
+
+        TransportRefreshSnapshot snap = transportRefreshSnapshots.get(refreshCacheKeyHash);
+        if (snap != null && client != null) {
+            int[] boostedProbe = new int[Transport.REQUIREMENT_LEVEL_COUNT];
+            final int[] probeOrdinals = snap.sortedSkillOrdinals;
             Microbot.getClientThread().runOnClientThreadOptional(() -> {
-                for (int i = 0; i < SKILLS.length; i++) {
-                    boostedProbe[i] = client.getBoostedSkillLevel(SKILLS[i]);
+                // Only the skills some transport gates on; probing all 23 both cost client-thread
+                // time and let hitpoints/prayer drift invalidate an otherwise valid cache.
+                if (probeOrdinals != null) {
+                    for (int ordinal : probeOrdinals) {
+                        if (ordinal >= 0 && ordinal < Transport.REQUIREMENT_LEVEL_COUNT) {
+                            boostedProbe[ordinal] = currentRequirementLevel(ordinal);
+                        }
+                    }
                 }
                 return true;
             });
-            int verProbe = computeTransportRefreshVerificationHash(boostedProbe, snap.sortedVarbits, snap.sortedVarplayers, snap.sortedQuestIds);
+            int verProbe = computeTransportRefreshVerificationHash(boostedProbe, snap.sortedSkillOrdinals,
+                    snap.sortedVarbitConditions, snap.sortedVarplayerConditions, snap.sortedQuestIds);
+            if (verProbe != snap.verificationHash) {
+                // Name the component that moved. "reason=verify" alone cannot distinguish a boosted
+                // skill from a varbit/varplayer/quest, and guessing which one has already cost a
+                // round trip. Reuse the probe we just read rather than re-querying.
+                int[] now = computeTransportRefreshVerificationComponents(boostedProbe, snap.sortedSkillOrdinals,
+                        snap.sortedVarbitConditions, snap.sortedVarplayerConditions, snap.sortedQuestIds);
+                int[] was = snap.verificationComponents;
+                lastVerifyMissDetail = was == null || was.length != now.length
+                        ? " changed=unknown"
+                        : " changed="
+                                + (now[0] != was[0] ? "skills," : "")
+                                + (now[1] != was[1] ? "varbits," : "")
+                                + (now[2] != was[2] ? "varplayers," : "")
+                                + (now[3] != was[3] ? "quests," : "");
+            }
             if (verProbe == snap.verificationHash) {
                 snap.restoreInto(this);
                 if (useBankItems && config != null && config.maxSimilarTransportDistance() > 0) {
                     filterSimilarTransports(target);
                 }
                 WebWalkLog.cfg("refresh_transports cache_hit key={}", refreshCacheKeyHash);
+                previousRefreshInvFingerprint = lastComputedInvFingerprint;
                 return;
             }
         }
+
+        // Cache miss => full re-evaluation of every transport, which is the pathfinder cold start the
+        // walker blocks on. Attribute it: "key" means the cache key changed (items/coins/toggles),
+        // "verify" means items were identical but game state moved (skills/varbits/varplayers/quests).
+        // invFp vs prevInvFp isolates the common case of spending coins on a fare or toll.
+        String cacheMissReason = transportRefreshSnapshots.isEmpty()
+                ? "no_snapshot"
+                : (snap == null ? "key" : "verify");
+        WebWalkLog.cfgSlow("refresh_transports cache_miss reason={} key={} prevKey={} invFp={} prevInvFp={} invChanged={}{}",
+                cacheMissReason,
+                refreshCacheKeyHash,
+                snap == null ? 0 : snap.cacheKeyHash,
+                lastComputedInvFingerprint,
+                previousRefreshInvFingerprint,
+                lastComputedInvFingerprint != previousRefreshInvFingerprint,
+                "verify".equals(cacheMissReason) ? lastVerifyMissDetail : "");
+        previousRefreshInvFingerprint = lastComputedInvFingerprint;
+        lastVerifyMissDetail = "";
 
         transports.clear();
         transportsPacked.clear();
         blockedTransportEdgesPacked.clear();
         addStaticBlockedEdges();
+        // Re-apply runtime-learned edges: addStaticBlockedEdges only restores the shipped set.
+        blockedTransportEdgesPacked.addAll(learnedBlockedEdgeKeys);
         usableTeleports.clear();
 
         long mergeStart = System.currentTimeMillis();
-        Map<WorldPoint, Set<Transport>> mergedList = createMergedList();
+        Map<WorldPoint, Set<Transport>> mergedList = bootstrapMergedList != null
+                ? bootstrapMergedList : createMergedList();
         long mergeTime = System.currentTimeMillis() - mergeStart;
 
         long cacheStart = System.currentTimeMillis();
-        refreshAvailableItemIds = new HashSet<>();
+        refreshAvailableItemQuantities = new HashMap<>();
         refreshCurrencyCache = new HashMap<>();
-        Rs2Inventory.items().forEach(item -> refreshAvailableItemIds.add(item.getId()));
-        Rs2Equipment.all().forEach(item -> refreshAvailableItemIds.add(item.getId()));
+        Rs2Inventory.items().forEach(item -> refreshAvailableItemQuantities.merge(
+                item.getId(), Math.max(0, item.getQuantity()), Integer::sum));
+        Rs2Equipment.all().forEach(item -> refreshAvailableItemQuantities.merge(
+                item.getId(), Math.max(0, item.getQuantity()), Integer::sum));
         if (useBankItems) {
-            Rs2Bank.getAll().forEach(item -> refreshAvailableItemIds.add(item.getId()));
+            Rs2Bank.getAll().forEach(item -> refreshAvailableItemQuantities.merge(
+                    item.getId(), Math.max(0, item.getQuantity()), Integer::sum));
         }
+        refreshAvailableRuneQuantities = new HashMap<>();
+        Rs2Magic.getRunes(RuneFilter.builder().includeBank(useBankItems).build())
+                .forEach((rune, quantity) -> refreshAvailableRuneQuantities.put(
+                        rune.getItemId(), quantity));
 
         Set<Integer> varbitIds = new HashSet<>();
+        List<int[]> varbitConditions = new ArrayList<>();
         Set<Integer> varplayerIds = new HashSet<>();
+        List<int[]> varplayerConditions = new ArrayList<>();
+        // Skills that some transport actually gates on (see hasRequiredLevels: a level > 0 is a
+        // requirement). Only these may participate in the verification hash — otherwise hitpoints
+        // regenerating invalidates the whole transport cache.
+        Set<Integer> requiredSkillOrdinals = new HashSet<>();
         for (Set<Transport> ts : mergedList.values()) {
             for (Transport t : ts) {
-                t.getVarbits().forEach(v -> varbitIds.add(v.getVarbitId()));
-                t.getVarplayers().forEach(v -> varplayerIds.add(v.getVarplayerId()));
+                t.getVarbits().forEach(v -> {
+                    varbitIds.add(v.getVarbitId());
+                    varbitConditions.add(new int[]{v.getVarbitId(), v.getOperator().ordinal(), v.getValue()});
+                });
+                t.getVarplayers().forEach(v -> {
+                    varplayerIds.add(v.getVarplayerId());
+                    varplayerConditions.add(new int[]{v.getVarplayerId(), v.getOperator().ordinal(), v.getValue()});
+                });
+                int[] required = t.getSkillLevels();
+                if (required != null) {
+                    for (int i = 0; i < required.length; i++) {
+                        if (required[i] > 0) {
+                            requiredSkillOrdinals.add(i);
+                        }
+                    }
+                }
+            }
+        }
+        if (bootstrapMergedList == null) {
+            Set<Integer> discoveredIds = collectTransportRelevantItemState(mergedList);
+            Set<Integer> expandedIds = expandTransportRelevantItemState(
+                    transportRelevantItemIds, discoveredIds);
+            if (expandedIds != transportRelevantItemIds) {
+                transportRelevantItemIds = expandedIds;
+                // A catalog variant may introduce an item gate. Capture under the key that
+                // fingerprints the expanded set, so later item changes cannot reuse this pass.
+                refreshCacheKeyHash = computeTransportRefreshCacheKeyHash(target, leaguesCtx, inCombat);
             }
         }
 
-        refreshBoostedLevels = new int[SKILLS.length];
+        refreshBoostedLevels = new int[Transport.REQUIREMENT_LEVEL_COUNT];
+        Map<Integer, Integer> varplayerValues = new HashMap<>();
         Microbot.getClientThread().runOnClientThreadOptional(() -> {
             for (int i = 0; i < SKILLS.length; i++) {
                 refreshBoostedLevels[i] = client.getBoostedSkillLevel(SKILLS[i]);
             }
+            refreshBoostedLevels[Transport.TOTAL_LEVEL_INDEX] = client.getTotalLevel();
+            Player localPlayer = client.getLocalPlayer();
+            refreshBoostedLevels[Transport.COMBAT_LEVEL_INDEX] =
+                    localPlayer == null ? 0 : localPlayer.getCombatLevel();
+            refreshBoostedLevels[Transport.QUEST_POINTS_INDEX] = client.getVarpValue(VarPlayer.QUEST_POINTS);
             for (int id : varbitIds) {
                 Microbot.getVarbitValue(id);
             }
+            // Read varps directly into the refresh snapshot: the global cache drops zero values,
+            // so pre-warming through it never helped the zero-valued ones.
             for (int id : varplayerIds) {
-                Microbot.getVarbitPlayerValue(id);
+                varplayerValues.put(id, client.getVarpValue(id));
             }
             return true;
         });
+        refreshVarplayerValues = varplayerValues;
         long cacheTime = System.currentTimeMillis() - cacheStart;
 
         long filterStart = System.currentTimeMillis();
@@ -397,11 +678,14 @@ public class PathfinderConfig {
             WorldPoint point = entry.getKey();
             Set<Transport> usableTransports = new HashSet<>(entry.getValue().size());
             for (Transport transport : entry.getValue()) {
+                if (transport == null) {
+                    continue;
+                }
                 totalTransports++;
                 updateActionBasedOnQuestState(transport);
 
                 long t0 = System.nanoTime();
-                boolean usable = useTransport(transport);
+                boolean usable = useTransport(transport, inCombat);
                 long elapsed = System.nanoTime() - t0;
                 useTransportTimeNanos += elapsed;
 
@@ -434,11 +718,18 @@ public class PathfinderConfig {
             }
         }
 
-        Rs2LeaguesTransport.injectLeaguesTransports(this, leaguesCtx, usableTeleports, transports, transportsPacked, typeStats);
+        Rs2LeaguesTransport.injectLeaguesTransports(
+                transport -> isTransportUsableWithLeaguesContext(transport, leaguesCtx, inCombat),
+                leaguesCtx,
+                usableTeleports,
+                transports,
+                transportsPacked,
+                typeStats);
         long filterTime = System.currentTimeMillis() - filterStart;
 
-        int[] sortedVarbits = varbitIds.stream().mapToInt(Integer::intValue).sorted().toArray();
-        int[] sortedVarplayers = varplayerIds.stream().mapToInt(Integer::intValue).sorted().toArray();
+        long verifyStart = System.currentTimeMillis();
+        int[] sortedVarbitConditions = encodeSortedConditionTriples(varbitConditions);
+        int[] sortedVarplayerConditions = encodeSortedConditionTriples(varplayerConditions);
         int[] sortedQuestIds = mergedList.values().stream()
                 .flatMap(Set::stream)
                 .filter(Objects::nonNull)
@@ -450,9 +741,18 @@ public class PathfinderConfig {
                 .distinct()
                 .sorted()
                 .toArray();
-        int verificationHash = computeTransportRefreshVerificationHash(refreshBoostedLevels, sortedVarbits, sortedVarplayers, sortedQuestIds);
-        transportRefreshSnapshot = TransportRefreshSnapshot.capture(
-                refreshCacheKeyHash, verificationHash, sortedVarbits, sortedVarplayers, sortedQuestIds, transports, usableTeleports);
+        int[] sortedSkillOrdinals = requiredSkillOrdinals.stream().mapToInt(Integer::intValue).sorted().toArray();
+        int verificationHash = computeTransportRefreshVerificationHash(refreshBoostedLevels, sortedSkillOrdinals,
+                sortedVarbitConditions, sortedVarplayerConditions, sortedQuestIds);
+        int[] verificationComponents = computeTransportRefreshVerificationComponents(refreshBoostedLevels,
+                sortedSkillOrdinals, sortedVarbitConditions, sortedVarplayerConditions, sortedQuestIds);
+        long verifyTime = System.currentTimeMillis() - verifyStart;
+        long captureStart = System.currentTimeMillis();
+        transportRefreshSnapshots.put(refreshCacheKeyHash, TransportRefreshSnapshot.capture(
+                refreshCacheKeyHash, verificationHash, verificationComponents,
+                sortedSkillOrdinals, sortedVarbitConditions, sortedVarplayerConditions, sortedQuestIds,
+                transports, usableTeleports, blockedTransportEdgesPacked));
+        long captureTime = System.currentTimeMillis() - captureStart;
 
         long similarStart = System.currentTimeMillis();
         if (useBankItems && config.maxSimilarTransportDistance() > 0) {
@@ -460,14 +760,35 @@ public class PathfinderConfig {
         }
         long similarTime = System.currentTimeMillis() - similarStart;
 
-        refreshAvailableItemIds = null;
+        refreshAvailableItemQuantities = null;
+        refreshAvailableRuneQuantities = null;
         refreshBoostedLevels = null;
         refreshCurrencyCache = null;
+        refreshVarplayerValues = null;
 
         // varbit/varplayer counts = distinct ids referenced by merged transport definitions this refresh, not total client var space.
-        WebWalkLog.cfg("refresh_transports merge={}ms cache={}ms filter={}ms useTrans={}ms similar={}ms total/chk={}/{} usablePost={} vb={} vp={}",
-                mergeTime, cacheTime, filterTime, useTransportTimeNanos / 1_000_000, similarTime,
+        WebWalkLog.cfg("refresh_transports entry={}ms bootstrap={}ms bootstrapMerge={}ms key={}ms merge={}ms cache={}ms filter={}ms useTrans={}ms verify={}ms capture={}ms similar={}ms total/chk={}/{} usablePost={} vb={} vp={}",
+                entryTime, bootstrapTime, bootstrapMergeTime, keyTime, mergeTime, cacheTime, filterTime, useTransportTimeNanos / 1_000_000,
+                verifyTime, captureTime, similarTime,
                 totalTransports, checkedTransports, usableTeleports.size(), varbitIds.size(), varplayerIds.size());
+
+        // Surface the same breakdown at INFO when the miss is slow enough to be the visible cold
+        // start, so the dominant stage is identifiable without enabling debug logging.
+        long refreshTransportsTotalMs = entryTime + bootstrapTime + keyTime + mergeTime + cacheTime + filterTime
+                + verifyTime + captureTime + similarTime;
+        if (refreshTransportsTotalMs >= SLOW_REFRESH_LOG_THRESHOLD_MS) {
+            WebWalkLog.cfgSlow("slow refresh_transports entry={}ms bootstrap={}ms bootstrapMerge={}ms key={}ms merge={}ms cache={}ms filter={}ms useTrans={}ms verify={}ms capture={}ms similar={}ms total/chk={}/{} vb={} vp={}",
+                    entryTime, bootstrapTime, bootstrapMergeTime, keyTime, mergeTime, cacheTime, filterTime, useTransportTimeNanos / 1_000_000,
+                    verifyTime, captureTime, similarTime,
+                    totalTransports, checkedTransports, varbitIds.size(), varplayerIds.size());
+            WebWalkLog.cfgSlow("slow refresh_transports keyDetail leagues={}ms inv={}ms equip={}ms bank={}ms",
+                    lastKeyLeaguesMs, lastKeyInvMs, lastKeyEquipMs, lastKeyBankMs);
+            typeStats.entrySet().stream()
+                    .sorted((a, b) -> Integer.compare(b.getValue()[2], a.getValue()[2]))
+                    .limit(3)
+                    .forEach(e -> WebWalkLog.cfgSlow("slow refresh_transports type {} cnt={} passed={} timeMs={}",
+                            e.getKey(), e.getValue()[0], e.getValue()[1], e.getValue()[2] / 1000));
+        }
 
         typeStats.entrySet().stream()
                 .sorted((a, b) -> Integer.compare(b.getValue()[2], a.getValue()[2]))
@@ -475,6 +796,54 @@ public class PathfinderConfig {
                 .forEach(e -> WebWalkLog.cfg("refresh_transports type {} cnt={} passed={} timeMs={}",
                         e.getKey(), e.getValue()[0], e.getValue()[1], e.getValue()[2] / 1000));
 
+    }
+
+    static void addSpellRuneItemIds(Set<Integer> relevantItemIds) {
+        Arrays.stream(Runes.values())
+                .map(Runes::getItemId)
+                .forEach(relevantItemIds::add);
+    }
+
+    private Set<Integer> collectTransportRelevantItemState(Map<WorldPoint, Set<Transport>> mergedList) {
+        Set<Integer> relevantItemIds = new HashSet<>();
+        Set<String> relevantCurrencyNames = new HashSet<>();
+        for (Set<Transport> transportsAtOrigin : mergedList.values()) {
+            for (Transport transport : transportsAtOrigin) {
+                if (transport.getItemIdRequirements() != null) {
+                    transport.getItemIdRequirements().stream()
+                            .filter(Objects::nonNull)
+                            .forEach(relevantItemIds::addAll);
+                }
+                if (transport.getCurrencyAmount() > 0 && transport.getCurrencyName() != null
+                        && !transport.getCurrencyName().isEmpty()) {
+                    relevantCurrencyNames.add(transport.getCurrencyName());
+                }
+            }
+        }
+        for (List<Restriction> group : Arrays.asList(resourceRestrictions, customRestrictions)) {
+            if (group == null) {
+                continue;
+            }
+            for (Restriction restriction : group) {
+                if (restriction != null && restriction.getItemIdRequirements() != null) {
+                    restriction.getItemIdRequirements().stream()
+                            .filter(Objects::nonNull)
+                            .forEach(relevantItemIds::addAll);
+                }
+            }
+        }
+        relevantItemIds.addAll(HARDCODED_USABILITY_ITEM_IDS);
+        addSpellRuneItemIds(relevantItemIds);
+        for (String currency : relevantCurrencyNames) {
+            int itemId = currencyItemId(currency);
+            if (itemId <= 0) {
+                log.warn("[Walker] transport currency '{}' has no known item id — transport-refresh cache "
+                        + "key falls back to fingerprinting every item", currency);
+                return null;
+            }
+            relevantItemIds.add(itemId);
+        }
+        return Collections.unmodifiableSet(relevantItemIds);
     }
 
     public boolean isBlockedTransportEdge(int originPacked, int destinationPacked) {
@@ -524,6 +893,69 @@ public class PathfinderConfig {
 
     private void addStaticBlockedEdges() {
         blockedTransportEdgesPacked.addAll(STATIC_BLOCKED_EDGES_PACKED);
+    }
+
+    /**
+     * Records a walking edge the walker just failed to traverse (e.g. a door that moved the player
+     * the wrong way, or a route click the reachability net proved walled). The observing session
+     * blocks the edge immediately — it just watched the failure, and anything less loops the walker
+     * into the same obstacle.
+     * <p>
+     * SESSION-ONLY by policy (2026-08-07): nothing is persisted, and nothing learned in an earlier
+     * session is loaded. The hand-curated {@code blocked_edges.tsv} is the sole cross-session
+     * authority. The two-strike persistent store this replaces spent its history managing its own
+     * failure modes — the Wydin door poisoning needed probation semantics to self-heal, and the
+     * store's default file leaked developer state into every test that built a config. An edge worth
+     * remembering across sessions is worth a reviewed TSV row.
+     * <p>
+     * Only the attempted direction is blocked — not bidirectionally — so a genuinely one-way door
+     * stays usable the other way. Callers must only pass <em>stable</em> map properties here;
+     * temporary, quest/skill-gated doors are handled by {@code restrictions.tsv} and must not be
+     * learned, or the bot would avoid them for the rest of the session after the requirement is met.
+     *
+     * @return {@code true} if this edge was newly blocked for this session; {@code false} if it was
+     * already blocked.
+     */
+    public boolean learnBlockedEdge(WorldPoint origin, WorldPoint destination, String reason) {
+        if (origin == null || destination == null) {
+            return false;
+        }
+        long key = transportEdgeKey(
+                WorldPointUtil.packWorldPoint(origin),
+                WorldPointUtil.packWorldPoint(destination));
+        if (!learnedBlockedEdgeKeys.add(key)) {
+            return false;
+        }
+        blockedTransportEdgesPacked.add(key);
+        log.info("[Walker] Learned blocked edge {} -> {} ({}) — blocked for THIS SESSION only; "
+                + "permanent blocks belong in blocked_edges.tsv", origin, destination, reason);
+        return true;
+    }
+
+    /**
+     * Reverse of {@link #learnBlockedEdge}: removes the learned block so the edge is plannable again.
+     * Exists for condition-scoped blocks (a door that refused to open for game-state reasons) that the
+     * walker withdraws at the next walk session start. Static rows from blocked_edges.tsv are not
+     * touched — they were never in {@code learnedBlockedEdgeKeys}, and {@code blockedTransportEdgesPacked}
+     * only drops the key when it was a learned one.
+     */
+    public boolean unlearnBlockedEdge(WorldPoint origin, WorldPoint destination, String reason) {
+        if (origin == null || destination == null) {
+            return false;
+        }
+        long key = transportEdgeKey(
+                WorldPointUtil.packWorldPoint(origin),
+                WorldPointUtil.packWorldPoint(destination));
+        if (!learnedBlockedEdgeKeys.remove(key)) {
+            return false;
+        }
+        if (!STATIC_BLOCKED_EDGES_PACKED.contains(key)) {
+            blockedTransportEdgesPacked.remove(key);
+        }
+        // Older snapshots may include this session block; never restore it after unlearning.
+        invalidateTransportRefreshCache();
+        log.info("[Walker] Unlearned blocked edge {} -> {} ({})", origin, destination, reason);
+        return true;
     }
 
     private void addBlockedEdge(WorldPoint origin, WorldPoint destination) {
@@ -648,22 +1080,31 @@ public class PathfinderConfig {
 
     private Map<WorldPoint, Set<Transport>> createMergedList() {
         if (!usePoh) return allTransports;
+        long mergeStarted = System.currentTimeMillis();
         Map<WorldPoint, Set<Transport>> mergedTransports = new HashMap<>();
 
         // Start with putting all the TSV imported persistent transports
         for (var entry : allTransports.entrySet()) {
             mergedTransports.put(entry.getKey(), new HashSet<>(entry.getValue()));
         }
+        long baseDone = System.currentTimeMillis();
 
         // Add transports from PoH to somewhere in the world
-        for (var entry : PohPanel.getAvailableTransports(allTransports).entrySet()) {
+        for (var entry : PohPanel.getAvailableTransports(allTransports, usePortalNexus).entrySet()) {
             mergedTransports
                     .computeIfAbsent(entry.getKey(), k -> new HashSet<>())
                     .addAll(entry.getValue());
         }
+        long availableDone = System.currentTimeMillis();
 
         // If we're already in Poh there's no reason to add teleports to Poh
-        if (PohTeleports.isInHouse()) {
+        boolean inHouse = PohPresence.isInHouse();
+        long houseDone = System.currentTimeMillis();
+        if (inHouse) {
+            if (houseDone - mergeStarted >= 100) {
+                WebWalkLog.cfgSlow("slow merged transport catalog base={}ms availablePoh={}ms house={}ms toPoh=0ms",
+                        baseDone - mergeStarted, availableDone - baseDone, houseDone - availableDone);
+            }
             return mergedTransports;
         }
         // Add transports from the world to PoH
@@ -671,6 +1112,12 @@ public class PathfinderConfig {
             mergedTransports
                     .computeIfAbsent(entry.getKey(), k -> new HashSet<>())
                     .addAll(entry.getValue());
+        }
+        long done = System.currentTimeMillis();
+        if (done - mergeStarted >= 100) {
+            WebWalkLog.cfgSlow("slow merged transport catalog base={}ms availablePoh={}ms house={}ms toPoh={}ms",
+                    baseDone - mergeStarted, availableDone - baseDone,
+                    houseDone - availableDone, done - houseDone);
         }
         return mergedTransports;
     }
@@ -680,11 +1127,12 @@ public class PathfinderConfig {
     }
 
     /**
-     * Drop {@link #transportRefreshSnapshot} so the next {@link #refresh(WorldPoint)} rebuilds transport maps
+     * Drop the transport-refresh snapshot cache so the next {@link #refresh(WorldPoint)} rebuilds transport maps
      * (inventory/quest/varbit changes that are not captured by the memo key, script-driven transport mutations, etc.).
      */
     public void invalidateTransportRefreshCache() {
-        transportRefreshSnapshot = null;
+        transportRefreshSnapshots.clear();
+        transportRelevantItemIdsInitialized = false;
     }
 
     /**
@@ -705,8 +1153,11 @@ public class PathfinderConfig {
         if (source == null || source.isEmpty()) {
             return;
         }
-        source.forEach((origin, set) ->
-                allTransports.put(origin, set == null ? Collections.emptySet() : new HashSet<>(set)));
+        source.forEach((origin, set) -> {
+            Set<Transport> valid = set == null ? new HashSet<>() : new HashSet<>(set);
+            valid.remove(null);
+            allTransports.put(origin, valid);
+        });
     }
 
     private void refreshRestrictionData() {
@@ -828,7 +1279,19 @@ public class PathfinderConfig {
     private boolean varplayerChecks(Transport transport) {
         return transport.getVarplayers().isEmpty() ||
                 transport.getVarplayers().stream()
-                        .allMatch(varplayerCheck -> varplayerCheck.matches(getLiveVarplayerValue(varplayerCheck.getVarplayerId())));
+                        .allMatch(varplayerCheck -> varplayerCheck.matches(getVarplayerValue(varplayerCheck.getVarplayerId())));
+    }
+
+    /** Refresh-scoped snapshot first (no cross-thread hop); live read only outside a refresh pass. */
+    private int getVarplayerValue(int varplayerId) {
+        Map<Integer, Integer> snapshot = refreshVarplayerValues;
+        if (snapshot != null) {
+            Integer value = snapshot.get(varplayerId);
+            if (value != null) {
+                return value;
+            }
+        }
+        return getLiveVarplayerValue(varplayerId);
     }
 
     private int getLiveVarplayerValue(int varplayerId) {
@@ -837,66 +1300,103 @@ public class PathfinderConfig {
                 .orElse(0);
     }
 
-    private boolean useTransport(Transport transport) {
+    static boolean hasAvailableCurrencyForFare(int carried, int banked, int fare,
+                                               boolean useBankItems) {
+        return (long) Math.max(0, carried) + (useBankItems ? Math.max(0, banked) : 0) >= fare;
+    }
+
+    /** The refresh snapshot already includes bank quantities when {@code useBankItems} is enabled. */
+    static int knownCurrencyQuantity(String currencyName, Map<Integer, Integer> availableQuantities) {
+        int itemId = currencyItemId(currencyName);
+        return itemId < 0 || availableQuantities == null
+                ? -1 : availableQuantities.getOrDefault(itemId, 0);
+    }
+
+    private boolean useTransport(Transport transport, boolean inCombat) {
+        // This runs once per expanded catalog edge during every refresh. Keep individual rejection
+        // reasons at TRACE; DEBUG already receives the per-type aggregate emitted by refreshTransports.
+        if (transport == null || !transportPlanningPolicy.isAdmitted(transport)) {
+            log.trace("Transport ( O: {} D: {} type={} ) has no registered Microbot executor",
+                    transport == null ? null : transport.getOrigin(),
+                    transport == null ? null : transport.getDestination(),
+                    transport == null ? null : transport.getType());
+            return false;
+        }
+        if (!isTransportAllowedDuringCombat(transport, inCombat)) {
+            log.trace("Transport ( O: {} D: {} ) is a home teleport unavailable during combat",
+                    transport.getOrigin(), transport.getDestination());
+            return false;
+        }
         // Check if the feature flag is disabled
         if (!isFeatureEnabled(transport)) {
-            log.debug("Transport Type {} is disabled by feature flag", transport.getType());
+            log.trace("Transport Type {} is disabled by feature flag", transport.getType());
             return false;
         }
         // If the transport requires you to be in a members world (used for more granular member requirements)
         if (transport.isMembers() && !client.getWorldType().contains(WorldType.MEMBERS)) {
-            log.debug("Transport ( O: {} D: {} ) requires members world", transport.getOrigin(), transport.getDestination());
+            log.trace("Transport ( O: {} D: {} ) requires members world", transport.getOrigin(), transport.getDestination());
             return false;
         }
         if (transport.getType() == TransportType.SPIRIT_TREE && !isSpiritTreeRouteEnabled(transport)) {
-            log.debug("Transport ( O: {} D: {} ) is a spirit tree route but the tree is disabled", transport.getOrigin(), transport.getDestination());
+            log.trace("Transport ( O: {} D: {} ) is a spirit tree route but the tree is disabled", transport.getOrigin(), transport.getDestination());
             return false;
         }
         // If you don't meet level requirements
         if (!hasRequiredLevels(transport)) {
-            log.debug("Transport ( O: {} D: {} ) requires skill levels {}", transport.getOrigin(), transport.getDestination(), Arrays.toString(transport.getSkillLevels()));
+            log.trace("Transport ( O: {} D: {} ) requires skill levels {}", transport.getOrigin(), transport.getDestination(), Arrays.toString(transport.getSkillLevels()));
             return false;
         }
         // If the transport has quest requirements & the quest haven't been completed
         if (transport.isQuestLocked() && !completedQuests(transport)) {
-            log.debug("Transport ( O: {} D: {} ) requires quests {}", transport.getOrigin(), transport.getDestination(), transport.getQuests());
+            log.trace("Transport ( O: {} D: {} ) requires quests {}", transport.getOrigin(), transport.getDestination(), transport.getQuests());
             return false;
         }
 
         // If the transport has varbit requirements & the varbits do not match
         if (!varbitChecks(transport)) {
-            log.debug("Transport ( O: {} D: {} ) requires varbits {}", transport.getOrigin(), transport.getDestination(), transport.getVarbits());
+            log.trace("Transport ( O: {} D: {} ) requires varbits {}", transport.getOrigin(), transport.getDestination(), transport.getVarbits());
             return false;
         }
 
         // If the transport has varplayer requirements & the varplayers do not match
         if (!varplayerChecks(transport)) {
-            log.debug("Transport ( O: {} D: {} ) requires varplayers {}", transport.getOrigin(), transport.getDestination(), transport.getVarplayers());
+            log.trace("Transport ( O: {} D: {} ) requires varplayers {}", transport.getOrigin(), transport.getDestination(), transport.getVarplayers());
             return false;
         }
 
         // If you don't have the required currency & amount for transport
         if (transport.getCurrencyAmount() > 0) {
-            if (refreshCurrencyCache != null) {
+            int knownCurrencyQuantity = knownCurrencyQuantity(
+                    transport.getCurrencyName(), refreshAvailableItemQuantities);
+            if (knownCurrencyQuantity >= 0) {
+                // Bank rows restored from saved IDs load item names on the client thread. The
+                // name-based bank lookup below can therefore take seconds even for Coins.
+                if (knownCurrencyQuantity < transport.getCurrencyAmount()) {
+                    return false;
+                }
+            } else if (refreshCurrencyCache != null) {
                 int[] cached = refreshCurrencyCache.computeIfAbsent(transport.getCurrencyName(), name -> {
-                    int invCount = Rs2Inventory.count(name);
+                    int invCount = Rs2Inventory.itemQuantity(name);
                     int bankCount = useBankItems ? Rs2Bank.count(name) : 0;
                     return new int[]{invCount, bankCount};
                 });
-                if (cached[0] < transport.getCurrencyAmount() && cached[1] < transport.getCurrencyAmount()) {
-                    log.debug("Transport ( O: {} D: {} ) requires {} x {}", transport.getOrigin(), transport.getDestination(), transport.getCurrencyAmount(), transport.getCurrencyName());
+                if (!hasAvailableCurrencyForFare(cached[0], cached[1],
+                        transport.getCurrencyAmount(), useBankItems)) {
+                    log.trace("Transport ( O: {} D: {} ) requires {} x {}", transport.getOrigin(), transport.getDestination(), transport.getCurrencyAmount(), transport.getCurrencyName());
                     return false;
                 }
-            } else if (!Rs2Inventory.hasItemAmount(transport.getCurrencyName(), transport.getCurrencyAmount())
-                    && !(useBankItems && Rs2Bank.count(transport.getCurrencyName()) >= transport.getCurrencyAmount())) {
-                log.debug("Transport ( O: {} D: {} ) requires {} x {}", transport.getOrigin(), transport.getDestination(), transport.getCurrencyAmount(), transport.getCurrencyName());
+            } else if (!hasAvailableCurrencyForFare(
+                    Rs2Inventory.itemQuantity(transport.getCurrencyName()),
+                    useBankItems ? Rs2Bank.count(transport.getCurrencyName()) : 0,
+                    transport.getCurrencyAmount(), useBankItems)) {
+                log.trace("Transport ( O: {} D: {} ) requires {} x {}", transport.getOrigin(), transport.getDestination(), transport.getCurrencyAmount(), transport.getCurrencyName());
                 return false;
             }
         }
 
         // Check if Teleports are globally disabled
         if (TransportType.isTeleport(transport.getType(), transport.getOrigin()) && Rs2Walker.disableTeleports) {
-            log.debug("Transport ( O: {} D: {} ) is a teleport but teleports are globally disabled", transport.getOrigin(), transport.getDestination());
+            log.trace("Transport ( O: {} D: {} ) is a teleport but teleports are globally disabled", transport.getOrigin(), transport.getDestination());
             return false;
         }
 
@@ -904,7 +1404,7 @@ public class PathfinderConfig {
         if (transport.getType() == TELEPORTATION_ITEM) {
             boolean isUsable = isTeleportationItemUsable(transport);
             if (!isUsable) {
-                log.debug("Transport ( O: {} D: {} ) is a teleport item but is not usable", transport.getOrigin(), transport.getDestination());
+                log.trace("Transport ( O: {} D: {} ) is a teleport item but is not usable", transport.getOrigin(), transport.getDestination());
             }
             return isUsable;
         }
@@ -912,7 +1412,7 @@ public class PathfinderConfig {
         if (transport.getType() == TELEPORTATION_SPELL) {
             boolean isUsable = isTeleportationSpellUsable(transport);
             if (!isUsable) {
-                log.debug("Transport ( O: {} D: {} ) is a teleport spell but is not usable", transport.getOrigin(), transport.getDestination());
+                log.trace("Transport ( O: {} D: {} ) is a teleport spell but is not usable", transport.getOrigin(), transport.getDestination());
             }
             return isUsable;
         }
@@ -921,7 +1421,7 @@ public class PathfinderConfig {
         if (!transport.getItemIdRequirements().isEmpty()) {
             boolean hasRequiredItems = hasRequiredItems(transport);
             if (!hasRequiredItems) {
-                log.debug("Transport ( O: {} D: {} ) requires items {}", transport.getOrigin(), transport.getDestination(), transport.getItemIdRequirements().stream().flatMap(Set::stream).collect(Collectors.toSet()));
+                log.trace("Transport ( O: {} D: {} ) requires items {}", transport.getOrigin(), transport.getDestination(), transport.getItemIdRequirements().stream().flatMap(Set::stream).collect(Collectors.toSet()));
             }
             return hasRequiredItems;
         }
@@ -934,14 +1434,24 @@ public class PathfinderConfig {
      * (Leagues catalog / Area teleports): quest action patch, {@link #useTransport}, {@link Rs2LeaguesTransport#isTransportAllowed}.
      */
     public boolean isTransportUsableWithLeaguesContext(Transport transport, Rs2LeaguesTransport.LeaguesContext leaguesCtx) {
-        if (transport == null || leaguesCtx == null) {
+        return isTransportUsableWithLeaguesContext(transport, leaguesCtx, Rs2Player.isInCombat());
+    }
+
+    private boolean isTransportUsableWithLeaguesContext(Transport transport,
+                                                          Rs2LeaguesTransport.LeaguesContext leaguesCtx,
+                                                          boolean inCombat) {
+        if (client == null || transport == null || leaguesCtx == null) {
             return false;
         }
         updateActionBasedOnQuestState(transport);
-        if (!useTransport(transport)) {
+        if (!useTransport(transport, inCombat)) {
             return false;
         }
         return Rs2LeaguesTransport.isTransportAllowed(leaguesCtx, transport);
+    }
+
+    boolean isTransportAllowedDuringCombat(Transport transport, boolean inCombat) {
+        return transport != null && (!inCombat || !transportPlanningPolicy.isZeroRuneSpell(transport));
     }
 
     /**
@@ -950,14 +1460,40 @@ public class PathfinderConfig {
     private boolean hasRequiredLevels(Transport transport) {
         int[] requiredLevels = transport.getSkillLevels();
         if (refreshBoostedLevels != null) {
-            for (int i = 0; i < requiredLevels.length; i++) {
-                if (requiredLevels[i] > 0 && refreshBoostedLevels[i] < requiredLevels[i]) return false;
-            }
-            return true;
+            return meetsRequiredLevels(requiredLevels, refreshBoostedLevels);
         }
         return IntStream.range(0, requiredLevels.length)
             .filter(i -> requiredLevels[i] > 0)
-            .allMatch(i -> Microbot.getClient().getBoostedSkillLevel(SKILLS[i]) >= requiredLevels[i]);
+            .allMatch(i -> currentRequirementLevel(i) >= requiredLevels[i]);
+    }
+
+    static boolean meetsRequiredLevels(int[] requiredLevels, int[] currentLevels) {
+        if (requiredLevels == null || currentLevels == null || currentLevels.length < requiredLevels.length) {
+            return false;
+        }
+        for (int i = 0; i < requiredLevels.length; i++) {
+            if (requiredLevels[i] > 0 && currentLevels[i] < requiredLevels[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private int currentRequirementLevel(int index) {
+        if (index >= 0 && index < SKILLS.length) {
+            return client.getBoostedSkillLevel(SKILLS[index]);
+        }
+        if (index == Transport.TOTAL_LEVEL_INDEX) {
+            return client.getTotalLevel();
+        }
+        if (index == Transport.COMBAT_LEVEL_INDEX) {
+            Player localPlayer = client.getLocalPlayer();
+            return localPlayer == null ? 0 : localPlayer.getCombatLevel();
+        }
+        if (index == Transport.QUEST_POINTS_INDEX) {
+            return client.getVarpValue(VarPlayer.QUEST_POINTS);
+        }
+        return 0;
     }
 
     /**
@@ -1040,6 +1576,29 @@ public class PathfinderConfig {
             }
         }
 
+        return isTransportTypeEnabled(type);
+    }
+
+    /** Immutable feature-toggle snapshot for planner-independent request policy. */
+    public Set<TransportType> getEnabledTransportTypes() {
+        EnumSet<TransportType> enabled = EnumSet.noneOf(TransportType.class);
+        for (TransportType type : TransportType.values()) {
+            if (isTransportTypeEnabled(type)) {
+                enabled.add(type);
+            }
+        }
+        return Collections.unmodifiableSet(enabled);
+    }
+
+    public TeleportationItem getTeleportationItemPolicy() {
+        return useTeleportationItems == null ? TeleportationItem.NONE : useTeleportationItems;
+    }
+
+    public boolean isMembersWorld() {
+        return client == null || client.getWorldType().contains(WorldType.MEMBERS);
+    }
+
+    private boolean isTransportTypeEnabled(TransportType type) {
         switch (type) {
             case AGILITY_SHORTCUT:
                 return useAgilityShortcuts;
@@ -1096,30 +1655,70 @@ public class PathfinderConfig {
      * Checks if a teleportation item is usable
      */
     private boolean isTeleportationItemUsable(Transport transport) {
-        if (useTeleportationItems == TeleportationItem.NONE) return false;
-        // Check consumable items configuration
-        if (useTeleportationItems == TeleportationItem.INVENTORY_NON_CONSUMABLE && transport.isConsumable())
+        if (!isTeleportationItemAllowedByPolicy(useTeleportationItems, transport.isConsumable())) {
             return false;
+        }
 
         return hasRequiredItems(transport);
+    }
+
+    static boolean isTeleportationItemAllowedByPolicy(
+            TeleportationItem policy,
+            boolean consumable) {
+        return policy != TeleportationItem.NONE
+                && (policy != TeleportationItem.INVENTORY_NON_CONSUMABLE || !consumable);
     }
 
     /**
      * Checks if the player has any of the required equipment and inventory items for the transport
      */
     private boolean hasRequiredItems(Transport transport) {
-        if (requiresChronicle(transport)) return hasChronicleCharges();
+        return TransportItemRequirement.selectProviders(
+                transport.getItemRequirements(),
+                this::availableRequirementItemQuantity,
+                itemId -> availableItemQuantity(itemId) > 0,
+                itemId -> availableItemQuantity(itemId) > 0).isPresent();
+    }
 
-        if (refreshAvailableItemIds != null) {
-            return transport.getItemIdRequirements()
-                    .stream()
-                    .flatMap(Collection::stream)
-                    .anyMatch(refreshAvailableItemIds::contains);
+    static boolean meetsItemRequirements(
+            List<TransportItemRequirement> requirements,
+            java.util.function.IntUnaryOperator availableQuantity) {
+        if (requirements == null || requirements.isEmpty()) {
+            return true;
         }
-        return transport.getItemIdRequirements()
-                .stream()
-                .flatMap(Collection::stream)
-                .anyMatch(itemId -> Rs2Equipment.isWearing(itemId) || Rs2Inventory.hasItem(itemId) || (ShortestPathPlugin.getPathfinderConfig().useBankItems && Rs2Bank.hasItem(itemId)));
+        return requirements.stream().allMatch(requirement -> requirement.isSatisfiedBy(availableQuantity));
+    }
+
+    private int availableItemQuantity(int itemId) {
+        if (itemId == ItemID.CHRONICLE && !hasChronicleCharges()) {
+            return 0;
+        }
+        if (refreshAvailableItemQuantities != null) {
+            return refreshAvailableItemQuantities.getOrDefault(itemId, 0);
+        }
+        int quantity = Rs2Inventory.itemQuantity(itemId);
+        Rs2ItemModel equipped = Rs2Equipment.get(itemId);
+        if (equipped != null) {
+            quantity += Math.max(1, equipped.getQuantity());
+        }
+        if (useBankItems) {
+            quantity += Rs2Bank.count(itemId);
+        }
+        return quantity;
+    }
+
+    private int availableRequirementItemQuantity(int itemId) {
+        Map<Integer, Integer> runeSnapshot = refreshAvailableRuneQuantities;
+        if (runeSnapshot != null) {
+            return Math.max(availableItemQuantity(itemId), runeSnapshot.getOrDefault(itemId, 0));
+        }
+        Runes rune = Runes.byItemId(itemId);
+        if (rune == null) {
+            return availableItemQuantity(itemId);
+        }
+        int runeQuantity = Rs2Magic.getRunes(
+                RuneFilter.builder().includeBank(useBankItems).build()).getOrDefault(rune, 0);
+        return Math.max(availableItemQuantity(itemId), runeQuantity);
     }
 
     /**
@@ -1133,7 +1732,16 @@ public class PathfinderConfig {
     }
 
 
-    private boolean isTeleportationSpellUsable(Transport transport) {
+    boolean isTeleportationSpellUsable(Transport transport) {
+        if (transportPlanningPolicy.isZeroRuneSpell(transport)) {
+            // Every spellbook home teleport is a zero-rune widget action. Spellbook, membership,
+            // quest, Wilderness and cooldown requirements were checked earlier in useTransport().
+            return true;
+        }
+
+        if (!transport.getItemRequirements().isEmpty()) {
+            return hasRequiredItems(transport);
+        }
 
         boolean hasMultipleDestination = transport.getDisplayInfo().contains(":");
         String displayInfo = hasMultipleDestination
@@ -1146,22 +1754,16 @@ public class PathfinderConfig {
     }
 
     /**
-     * Checks if the transport requires the Chronicle
-     */
-    private boolean requiresChronicle(Transport transport) {
-        return transport.getItemIdRequirements()
-                .stream()
-                .flatMap(Collection::stream)
-                .anyMatch(itemId -> itemId == ItemID.CHRONICLE);
-    }
-
-    /**
      * Checks if the Chronicle has charges
      */
     private boolean hasChronicleCharges() {
         if (!Rs2Equipment.isWearing(ItemID.CHRONICLE)) {
             if (!Rs2Inventory.hasItem(ItemID.CHRONICLE))
                 return false;
+        }
+
+        if (Microbot.getConfigManager() == null) {
+            return false;
         }
 
         String charges = Microbot.getConfigManager()
@@ -1178,7 +1780,18 @@ public class PathfinderConfig {
         }
 
         // Validate charges
-        return charges != null && Integer.parseInt(charges) > 0;
+        return chronicleChargeState(charges) > 0;
+    }
+
+    static int chronicleChargeState(String charges) {
+        if (charges == null || charges.trim().isEmpty()) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(charges.trim()) > 0 ? 1 : 0;
+        } catch (NumberFormatException invalid) {
+            return -1;
+        }
     }
 
     @Deprecated(since = "1.6.2 - Add Restrictions to restrictions.tsv", forRemoval = true)
@@ -1457,29 +2070,62 @@ public class PathfinderConfig {
         }
     }
 
-    private int computeTransportRefreshCacheKeyHash(WorldPoint target, Rs2LeaguesTransport.LeaguesContext leaguesCtx) {
+    private int computeTransportRefreshCacheKeyHash(WorldPoint target,
+                                                     Rs2LeaguesTransport.LeaguesContext leaguesCtx,
+                                                     boolean inCombat) {
         assert leaguesCtx != null;
+        long started = System.nanoTime();
         int invFp = fingerprintInventoryEquipmentBank();
+        long inventoryDone = System.nanoTime();
+        lastComputedInvFingerprint = invFp;
         int members = (client != null && client.getWorldType().contains(WorldType.MEMBERS)) ? 1 : 0;
         int preferTp = (config != null && config.preferTransportToTarget()) ? 1 : 0;
         int maxSimilar = config != null ? config.maxSimilarTransportDistance() : 0;
-        return Objects.hash(
+        long settingsDone = System.nanoTime();
+        int leagueType = Microbot.getVarbitValue(VarbitID.LEAGUE_TYPE);
+        long leagueDone = System.nanoTime();
+        int unlockedRegionsHash = leaguesCtx.getUnlockedRegions().hashCode();
+        long regionsDone = System.nanoTime();
+        int chronicleCharges = (Rs2Inventory.hasItem(ItemID.CHRONICLE)
+                || Rs2Equipment.isWearing(ItemID.CHRONICLE))
+                ? chronicleChargeState(Microbot.getConfigManager() == null ? null
+                        : Microbot.getConfigManager().getRSProfileConfiguration(
+                                ItemChargeConfig.GROUP, ItemChargeConfig.KEY_CHRONICLE))
+                : -2;
+        long contextDone = System.nanoTime();
+        boolean inHouse = usePoh && PohPresence.isInHouse();
+        long houseDone = System.nanoTime();
+        int hash = Objects.hash(
                 packTransportRefreshToggleBits(),
                 useTeleportationItems,
                 ignoreTeleportAndItems,
                 useBankItems,
                 useNpcs,
+                inCombat,
                 invFp,
                 members,
                 Rs2Walker.disableTeleports,
-                Microbot.getVarbitValue(VarbitID.LEAGUE_TYPE),
+                leagueType,
                 leaguesCtx.isActive(),
-                leaguesCtx.getUnlockedRegions().hashCode(),
+                unlockedRegionsHash,
+                chronicleCharges,
                 usePoh,
-                PohTeleports.isInHouse(),
+                inHouse,
                 maxSimilar,
                 preferTp,
                 distanceBeforeUsingTeleport);
+        long done = System.nanoTime();
+        if (done - started >= 100_000_000L) {
+            WebWalkLog.cfgSlow("slow transport key inv={}ms settings={}ms league={}ms regions={}ms charges={}ms house={}ms hash={}ms",
+                    (inventoryDone - started) / 1_000_000L,
+                    (settingsDone - inventoryDone) / 1_000_000L,
+                    (leagueDone - settingsDone) / 1_000_000L,
+                    (regionsDone - leagueDone) / 1_000_000L,
+                    (contextDone - regionsDone) / 1_000_000L,
+                    (houseDone - contextDone) / 1_000_000L,
+                    (done - houseDone) / 1_000_000L);
+        }
+        return hash;
     }
 
     private long packTransportRefreshToggleBits() {
@@ -1504,6 +2150,8 @@ public class PathfinderConfig {
         if (useMinecarts) bits |= 1L << s;
         s++;
         if (usePoh) bits |= 1L << s;
+        s++;
+        if (usePortalNexus) bits |= 1L << s;
         s++;
         if (useQuetzals) bits |= 1L << s;
         s++;
@@ -1541,44 +2189,138 @@ public class PathfinderConfig {
         return bits;
     }
 
+    /**
+     * Items no transport can possibly gate on must not participate in the cache key — the same
+     * argument already applied to skills above.
+     * <p>
+     * Hashing EVERY item meant any inventory, equipment or bank change minted a new key, and a new key
+     * is a full re-evaluation of ~5,700 transports. Measured over a questing session: 0 cache hits, 22
+     * misses, every one of them {@code invChanged=true}. Quests are the pathological case because they
+     * churn the inventory constantly AND walk after nearly every step, so they paid the ~2.3s cold
+     * start (7.8s worst) on almost every walk. A fishing script churns items too but walks once a trip,
+     * so it only ate it occasionally — which is why this looked like a questing bug.
+     * <p>
+     * Usability depends on item state in exactly four places, all enumerated into the relevant sets by
+     * {@link #collectTransportRelevantItemState}: transport {@code itemIdRequirements}, restriction
+     * {@code itemIdRequirements}, the hardcoded fairy-ring staves and Chronicle, and currency — which
+     * is matched by NAME, not id, so ids alone would silently stop coin changes invalidating the
+     * cache and leave a stale "you can afford this" verdict.
+     *
+     * Deliberately takes an ITEM ID only. An earlier version also compared {@code item.getName()}
+     * against the currency names, which was a client-thread stall in disguise: {@link
+     * net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel#getName()} lazily loads the item
+     * composition through {@code runOnClientThread}, so fingerprinting a full bank fired hundreds of
+     * client-thread round-trips per cache-key computation and every other script's queued task timed
+     * out at once. Currency is resolved to ids at collection time instead — see
+     * {@link #currencyItemId(String)} — so this stays pure arithmetic.
+     */
+    static boolean itemAffectsTransportUsability(int itemId, Set<Integer> relevantItemIds) {
+        // Null set = not built yet, or a currency we could not resolve: fingerprint everything, which
+        // is exactly the old behaviour and never under-invalidates.
+        return relevantItemIds == null || relevantItemIds.contains(itemId);
+    }
+
+    static Set<Integer> expandTransportRelevantItemState(Set<Integer> previous, Set<Integer> discovered) {
+        // Null means an unknown currency forced the safe all-item fingerprint. Never narrow it
+        // until explicit invalidation, even if another catalog variant has known currencies.
+        if (previous == null || discovered == null || previous.containsAll(discovered)) {
+            return previous == null || discovered == null ? null : previous;
+        }
+        Set<Integer> expanded = new HashSet<>(previous);
+        expanded.addAll(discovered);
+        return Collections.unmodifiableSet(expanded);
+    }
+
+    /**
+     * Currency name to item id, mirroring the banking planner's resolver. Returns -1 for anything
+     * unknown, which disables the narrowing entirely rather than silently dropping that currency's
+     * invalidation.
+     */
+    private static int currencyItemId(String currencyName) {
+        if (currencyName == null || currencyName.trim().isEmpty()) {
+            return -1;
+        }
+        switch (currencyName.trim().toLowerCase()) {
+            case "coins":
+                return ItemID.COINS;
+            case "ecto-token":
+                return ItemID.ECTOTOKEN;
+            default:
+                return -1;
+        }
+    }
+
+    // The cold-login key phase measured 658ms of an 833ms client-thread refresh (2026-08-13 19:40,
+    // reason=no_snapshot; warm refreshes read 1ms) — these name which read pays it. Written on every
+    // fingerprint, printed only on the slow log.
+    private volatile long lastKeyLeaguesMs;
+    private volatile long lastKeyInvMs;
+    private volatile long lastKeyEquipMs;
+    private volatile long lastKeyBankMs;
+
     private int fingerprintInventoryEquipmentBank() {
+        final Set<Integer> ids = transportRelevantItemIds;
         final int[] h = {1};
+        long t = System.currentTimeMillis();
         Rs2Inventory.items().forEach(item -> {
+            if (!itemAffectsTransportUsability(item.getId(), ids)) return;
             h[0] = 31 * h[0] + item.getId();
             h[0] = 31 * h[0] + item.getQuantity();
         });
+        lastKeyInvMs = System.currentTimeMillis() - t;
+        t = System.currentTimeMillis();
         Rs2Equipment.all().forEach(item -> {
+            if (!itemAffectsTransportUsability(item.getId(), ids)) return;
             h[0] = 31 * h[0] + item.getId();
             h[0] = 31 * h[0] + item.getQuantity();
         });
+        lastKeyEquipMs = System.currentTimeMillis() - t;
+        t = System.currentTimeMillis();
         if (useBankItems) {
             Rs2Bank.getAll().forEach(item -> {
+                if (!itemAffectsTransportUsability(item.getId(), ids)) return;
                 h[0] = 31 * h[0] + item.getId();
                 h[0] = 31 * h[0] + item.getQuantity();
             });
         }
+        lastKeyBankMs = System.currentTimeMillis() - t;
         return h[0];
     }
 
-    private static int computeTransportRefreshVerificationHash(int[] boostedLevels, int[] sortedVarbits, int[] sortedVarplayers, int[] sortedQuestIds) {
-        return computeTransportRefreshVerificationHash(boostedLevels, sortedVarbits, sortedVarplayers, sortedQuestIds, questId -> {
+    private static int computeTransportRefreshVerificationHash(int[] boostedLevels, int[] sortedSkillOrdinals,
+            int[] sortedVarbitConditions, int[] sortedVarplayerConditions, int[] sortedQuestIds) {
+        return computeTransportRefreshVerificationHash(boostedLevels, sortedSkillOrdinals, sortedVarbitConditions, sortedVarplayerConditions,
+                sortedQuestIds, questId -> {
             Quest quest = resolveQuestById(questId);
             return quest == null ? QuestState.NOT_STARTED : Rs2Player.getQuestState(quest);
         });
     }
 
-    static int computeTransportRefreshVerificationHash(int[] boostedLevels, int[] sortedVarbits, int[] sortedVarplayers,
+    /**
+     * @param sortedSkillOrdinals skills that some transport actually gates on. Hashing every skill
+     *                            (the previous {@code Arrays.hashCode(boostedLevels)}) meant
+     *                            hitpoints regenerating or prayer draining invalidated the transport
+     *                            cache, forcing a full ~2.6s re-evaluation on most walks. A skill no
+     *                            transport requires cannot change any transport's usability, so it
+     *                            must not participate — mirroring how varbits/varplayers are already
+     *                            collected from the transports themselves.
+     */
+    static int computeTransportRefreshVerificationHash(int[] boostedLevels, int[] sortedSkillOrdinals,
+            int[] sortedVarbitConditions, int[] sortedVarplayerConditions,
             int[] sortedQuestIds, IntFunction<QuestState> questStateProvider) {
         assert boostedLevels != null;
-        int h = Arrays.hashCode(boostedLevels);
-        for (int id : sortedVarbits) {
-            h = 31 * h + id;
-            h = 31 * h + Microbot.getVarbitValue(id);
+        int h = 1;
+        if (sortedSkillOrdinals != null) {
+            for (int ordinal : sortedSkillOrdinals) {
+                if (ordinal < 0 || ordinal >= boostedLevels.length) {
+                    continue;
+                }
+                h = 31 * h + ordinal;
+                h = 31 * h + boostedLevels[ordinal];
+            }
         }
-        for (int id : sortedVarplayers) {
-            h = 31 * h + id;
-            h = 31 * h + Microbot.getVarbitPlayerValue(id);
-        }
+        h = 31 * h + hashVarbitConditionVerdicts(sortedVarbitConditions);
+        h = 31 * h + hashVarplayerConditionVerdicts(sortedVarplayerConditions);
         for (int questId : sortedQuestIds) {
             h = 31 * h + questId;
             h = 31 * h + questStateHashCode(questStateProvider.apply(questId));
@@ -1587,6 +2329,154 @@ public class PathfinderConfig {
         if (Arrays.binarySearch(sortedQuestIds, clientOfKourendId) < 0) {
             h = 31 * h + clientOfKourendId;
             h = 31 * h + questStateHashCode(questStateProvider.apply(clientOfKourendId));
+        }
+        return h;
+    }
+
+    /**
+     * The verification hash split into its four independent parts
+     * {skills, varbits, varplayers, quests}, so a verify-miss can name what actually changed instead
+     * of only reporting that something did.
+     */
+    static int[] computeTransportRefreshVerificationComponents(int[] boostedLevels, int[] sortedSkillOrdinals,
+            int[] sortedVarbitConditions, int[] sortedVarplayerConditions, int[] sortedQuestIds) {
+        return computeTransportRefreshVerificationComponents(boostedLevels, sortedSkillOrdinals, sortedVarbitConditions,
+                sortedVarplayerConditions, sortedQuestIds, questId -> {
+            Quest quest = resolveQuestById(questId);
+            return quest == null ? QuestState.NOT_STARTED : Rs2Player.getQuestState(quest);
+        });
+    }
+
+    static int[] computeTransportRefreshVerificationComponents(int[] boostedLevels, int[] sortedSkillOrdinals,
+            int[] sortedVarbitConditions, int[] sortedVarplayerConditions, int[] sortedQuestIds,
+            IntFunction<QuestState> questStateProvider) {
+        int skills = 1;
+        if (boostedLevels != null && sortedSkillOrdinals != null) {
+            for (int ordinal : sortedSkillOrdinals) {
+                if (ordinal < 0 || ordinal >= boostedLevels.length) continue;
+                skills = 31 * skills + ordinal;
+                skills = 31 * skills + boostedLevels[ordinal];
+            }
+        }
+        int varbits = hashVarbitConditionVerdicts(sortedVarbitConditions);
+        int varplayers = hashVarplayerConditionVerdicts(sortedVarplayerConditions);
+        int quests = 1;
+        if (sortedQuestIds != null) {
+            for (int questId : sortedQuestIds) {
+                quests = 31 * quests + questId;
+                quests = 31 * quests + questStateHashCode(questStateProvider.apply(questId));
+            }
+            // Mirror computeTransportRefreshVerificationHash's explicit CLIENT_OF_KOUREND fallback so this
+            // component stays aligned with the full verification hash when the quest is absent from the list.
+            int clientOfKourendId = Quest.CLIENT_OF_KOUREND.getId();
+            if (Arrays.binarySearch(sortedQuestIds, clientOfKourendId) < 0) {
+                quests = 31 * quests + clientOfKourendId;
+                quests = 31 * quests + questStateHashCode(questStateProvider.apply(clientOfKourendId));
+            }
+        }
+        return new int[]{skills, varbits, varplayers, quests};
+    }
+
+
+    /**
+     * Deterministic {id, operatorOrdinal, value} triples for every varbit/varplayer condition any
+     * transport declares, deduplicated and sorted.
+     */
+    static int[] encodeSortedConditionTriples(List<int[]> conditions) {
+        if (conditions == null || conditions.isEmpty()) {
+            return new int[0];
+        }
+        java.util.TreeSet<int[]> sorted = new java.util.TreeSet<>((a, b) -> {
+            if (a[0] != b[0]) return Integer.compare(a[0], b[0]);
+            if (a[1] != b[1]) return Integer.compare(a[1], b[1]);
+            return Integer.compare(a[2], b[2]);
+        });
+        sorted.addAll(conditions);
+        int[] out = new int[sorted.size() * 3];
+        int i = 0;
+        for (int[] c : sorted) {
+            out[i++] = c[0];
+            out[i++] = c[1];
+            out[i++] = c[2];
+        }
+        return out;
+    }
+
+    /**
+     * Hashes varplayer condition VERDICTS rather than raw varplayer values.
+     * <p>
+     * A {@code COOLDOWN_MINUTES} condition compares against wall-clock minutes, so its raw value
+     * advances continuously and would invalidate the transport cache forever. Worse, casting Home
+     * Teleport writes {@code LAST_HOME_TELEPORT} — one of the hashed varplayers — so a teleport
+     * invalidated the cache simply by being used, forcing a full re-evaluation of every transport
+     * (~2.6s) immediately after the teleport it had just performed.
+     * <p>
+     * Only a flip in whether a condition is satisfied can change a transport's usability, so that is
+     * what participates. The condition identity is hashed too, so adding/removing a condition still
+     * invalidates, and an expiring cooldown flips the verdict exactly once.
+     */
+    static int hashVarbitConditionVerdicts(int[] conditions) {
+        return hashVarbitConditionVerdicts(conditions, Microbot::getVarbitValue);
+    }
+
+    /**
+     * Varbit counterpart of {@link #hashVarplayerConditionVerdicts}. Same rule: only a flip in
+     * whether a condition is satisfied can change a transport's usability, so a raw varbit moving
+     * without changing any verdict must not invalidate the cache.
+     *
+     * @param varbitValueProvider injectable for tests; production reads the live varbit.
+     */
+    static int hashVarbitConditionVerdicts(int[] conditions,
+            java.util.function.IntUnaryOperator varbitValueProvider) {
+        if (conditions == null || conditions.length < 3) {
+            return 1;
+        }
+        TransportVarbit.Operator[] operators = TransportVarbit.Operator.values();
+        Map<Integer, Integer> actualValues = new HashMap<>();
+        int h = 1;
+        for (int i = 0; i + 2 < conditions.length; i += 3) {
+            int id = conditions[i];
+            int opOrdinal = conditions[i + 1];
+            int value = conditions[i + 2];
+            h = 31 * h + id;
+            h = 31 * h + opOrdinal;
+            h = 31 * h + value;
+            boolean satisfied = false;
+            if (opOrdinal >= 0 && opOrdinal < operators.length) {
+                int actual = actualValues.computeIfAbsent(id, varbitValueProvider::applyAsInt);
+                satisfied = new TransportVarbit(id, value, operators[opOrdinal]).matches(actual);
+            }
+            h = 31 * h + (satisfied ? 1 : 0);
+        }
+        return h;
+    }
+
+    static int hashVarplayerConditionVerdicts(int[] conditions) {
+        return hashVarplayerConditionVerdicts(conditions, Microbot::getVarbitPlayerValue);
+    }
+
+    /** @param varplayerValueProvider injectable for tests; production reads the live varplayer. */
+    static int hashVarplayerConditionVerdicts(int[] conditions,
+            java.util.function.IntUnaryOperator varplayerValueProvider) {
+        if (conditions == null || conditions.length < 3) {
+            return 1;
+        }
+        TransportVarPlayer.Operator[] operators = TransportVarPlayer.Operator.values();
+        Map<Integer, Integer> actualValues = new HashMap<>();
+        int h = 1;
+        for (int i = 0; i + 2 < conditions.length; i += 3) {
+            int id = conditions[i];
+            int opOrdinal = conditions[i + 1];
+            int value = conditions[i + 2];
+            h = 31 * h + id;
+            h = 31 * h + opOrdinal;
+            h = 31 * h + value;
+            boolean satisfied = false;
+            if (opOrdinal >= 0 && opOrdinal < operators.length) {
+                int actual = actualValues.computeIfAbsent(id, varplayerValueProvider::applyAsInt);
+                satisfied = new TransportVarPlayer(id, value, operators[opOrdinal]).matches(actual);
+            }
+            h = 31 * h + (satisfied ? 1 : 0);
         }
         return h;
     }
@@ -1616,37 +2506,51 @@ public class PathfinderConfig {
         return null;
     }
 
-    private static final class TransportRefreshSnapshot {
+    static final class TransportRefreshSnapshot {
         private final int cacheKeyHash;
         private final int verificationHash;
-        private final int[] sortedVarbits;
-        private final int[] sortedVarplayers;
+        private final int[] sortedSkillOrdinals;
+        private final int[] verificationComponents;
+        private final int[] sortedVarbitConditions;
+        private final int[] sortedVarplayerConditions;
         private final int[] sortedQuestIds;
         private final Map<WorldPoint, Set<Transport>> transportsData;
         private final Set<Transport> usableData;
+        private final Set<Long> blockedEdgesData;
 
-        private TransportRefreshSnapshot(int cacheKeyHash, int verificationHash, int[] sortedVarbits, int[] sortedVarplayers,
+        private TransportRefreshSnapshot(int cacheKeyHash, int verificationHash, int[] verificationComponents,
+                int[] sortedSkillOrdinals,
+                int[] sortedVarbitConditions, int[] sortedVarplayerConditions,
                 int[] sortedQuestIds,
-                Map<WorldPoint, Set<Transport>> transportsData, Set<Transport> usableData) {
+                Map<WorldPoint, Set<Transport>> transportsData, Set<Transport> usableData,
+                Set<Long> blockedEdgesData) {
             this.cacheKeyHash = cacheKeyHash;
             this.verificationHash = verificationHash;
-            this.sortedVarbits = sortedVarbits;
-            this.sortedVarplayers = sortedVarplayers;
+            this.sortedSkillOrdinals = sortedSkillOrdinals;
+            this.verificationComponents = verificationComponents;
+            this.sortedVarbitConditions = sortedVarbitConditions;
+            this.sortedVarplayerConditions = sortedVarplayerConditions;
             this.sortedQuestIds = sortedQuestIds;
             this.transportsData = transportsData;
             this.usableData = usableData;
+            this.blockedEdgesData = blockedEdgesData;
         }
 
-        static TransportRefreshSnapshot capture(int cacheKeyHash, int verificationHash, int[] sortedVarbits, int[] sortedVarplayers,
+        static TransportRefreshSnapshot capture(int cacheKeyHash, int verificationHash, int[] verificationComponents,
+                int[] sortedSkillOrdinals,
+                int[] sortedVarbitConditions, int[] sortedVarplayerConditions,
                 int[] sortedQuestIds,
-                Map<WorldPoint, Set<Transport>> srcTransports, Set<Transport> srcUsable) {
+                Map<WorldPoint, Set<Transport>> srcTransports, Set<Transport> srcUsable,
+                Set<Long> srcBlockedEdges) {
             assert srcTransports != null && srcUsable != null;
             Map<WorldPoint, Set<Transport>> copy = new HashMap<>(srcTransports.size());
             for (Map.Entry<WorldPoint, Set<Transport>> e : srcTransports.entrySet()) {
                 copy.put(e.getKey(), new HashSet<>(e.getValue()));
             }
             Set<Transport> usableCopy = new HashSet<>(srcUsable);
-            return new TransportRefreshSnapshot(cacheKeyHash, verificationHash, sortedVarbits, sortedVarplayers, sortedQuestIds, copy, usableCopy);
+            return new TransportRefreshSnapshot(cacheKeyHash, verificationHash, verificationComponents, sortedSkillOrdinals, sortedVarbitConditions,
+                    sortedVarplayerConditions, sortedQuestIds, copy, usableCopy,
+                    new HashSet<>(srcBlockedEdges));
         }
 
         void restoreInto(PathfinderConfig c) {
@@ -1660,6 +2564,9 @@ public class PathfinderConfig {
                 c.transportsPacked.put(WorldPointUtil.packWorldPoint(wp), set);
             }
             c.usableTeleports.addAll(new HashSet<>(usableData));
+            c.blockedTransportEdgesPacked.clear();
+            c.blockedTransportEdgesPacked.addAll(blockedEdgesData);
+            c.blockedTransportEdgesPacked.addAll(c.learnedBlockedEdgeKeys);
         }
     }
 

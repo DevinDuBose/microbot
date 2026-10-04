@@ -5,12 +5,15 @@ import net.runelite.api.TileObject;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.shortestpath.Transport;
 import net.runelite.client.plugins.microbot.shortestpath.TransportType;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionOverlay;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveEdgeSource;
 import net.runelite.client.plugins.microbot.shortestpath.WorldPointUtil;
 import net.runelite.client.plugins.microbot.util.coords.Rs2WorldPoint;
 import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 
 import java.util.*;
+import java.util.function.IntSupplier;
 
 @Slf4j
 public class CollisionMap {
@@ -19,16 +22,72 @@ public class CollisionMap {
 
     private final SplitFlagMap collisionData;
 
+    /**
+     * Shared live-collision overlay. When enabled and covering {@code (x, y, z)}, its edges win over the
+     * static map; otherwise every read falls through to {@code collisionData}. Defaults to a disabled
+     * holder, so a {@link #CollisionMap(SplitFlagMap)} behaves exactly as the static-only map — the whole
+     * existing test suite is unaffected.
+     */
+    private final LiveCollisionOverlay overlay;
+
+    /**
+     * Supplies the live player region for instance-only obstacle policy. Static/offline maps use a
+     * sentinel supplier so pathfinding tests never reach into the RuneLite client thread.
+     */
+    private final IntSupplier currentRegionIdSupplier;
+
+    /**
+     * Live view pinned for the duration of one search, so a mid-search merge on the client thread cannot
+     * mix two states into a single path. Refreshed via {@link #beginSearch()}.
+     */
+    private LiveEdgeSource pinnedLive;
+
+    /** Number of edge reads answered by the pinned live overlay during the current search. */
+    private long liveEdgeQueries;
+
     public byte[] getPlanes() {
         return collisionData.getRegionMapPlaneCounts();
     }
 
     public CollisionMap(SplitFlagMap collisionData) {
+        this(collisionData, new LiveCollisionOverlay(), () -> -1);
+    }
+
+    public CollisionMap(SplitFlagMap collisionData, LiveCollisionOverlay overlay) {
+        this(collisionData, overlay, CollisionMap::readLivePlayerRegionId);
+    }
+
+    CollisionMap(SplitFlagMap collisionData, LiveCollisionOverlay overlay,
+                 IntSupplier currentRegionIdSupplier) {
         this.collisionData = collisionData;
+        this.overlay = overlay;
+        this.currentRegionIdSupplier = currentRegionIdSupplier;
+    }
+
+    /**
+     * Pins the overlay's current snapshot for the upcoming search. Called once at the start of a
+     * pathfind so every {@link #get} within that search sees one immutable view; between searches the
+     * client thread is free to swap in a newer snapshot.
+     */
+    public void beginSearch() {
+        pinnedLive = overlay.current();
+        liveEdgeQueries = 0L;
     }
 
     private boolean get(int x, int y, int z, int flag) {
+        final LiveEdgeSource live = pinnedLive;
+        if (live != null) {
+            final Boolean liveEdge = live.edge(x, y, z, flag);
+            if (liveEdge != null) {
+                liveEdgeQueries++;
+                return liveEdge;
+            }
+        }
         return collisionData.get(x, y, z, flag);
+    }
+
+    public long getLiveEdgeQueries() {
+        return liveEdgeQueries;
     }
 
     public boolean n(int x, int y, int z) {
@@ -65,6 +124,19 @@ public class CollisionMap {
 
     public boolean isBlocked(int x, int y, int z) {
         return !n(x, y, z) && !s(x, y, z) && !e(x, y, z) && !w(x, y, z);
+    }
+
+    /**
+     * Whether collision data exists for the region containing {@code (x, y)}.
+     *
+     * <p>Required to interpret {@link #isBlocked}: an <em>unmapped</em> region reads as fully
+     * blocked, because {@link SplitFlagMap#get} returns {@code false} for one and {@code isBlocked}
+     * negates all four directions. Gate on this before treating blocked as unreachable.
+     *
+     * @see SplitFlagMap#hasRegion(int, int)
+     */
+    public boolean hasRegion(int x, int y) {
+        return collisionData.hasRegion(x, y);
     }
 
     /**
@@ -169,14 +241,18 @@ public class CollisionMap {
         long now = System.currentTimeMillis();
         if (now - cachedRegionIdTime > REGION_CACHE_MS) {
             try {
-                WorldPoint loc = Rs2Player.getWorldLocation();
-                cachedRegionId = loc != null ? loc.getRegionID() : -1;
+                cachedRegionId = currentRegionIdSupplier.getAsInt();
             } catch (Exception e) {
                 cachedRegionId = -1;
             }
             cachedRegionIdTime = now;
         }
         return cachedRegionId;
+    }
+
+    private static int readLivePlayerRegionId() {
+        WorldPoint loc = Rs2Player.getWorldLocation();
+        return loc != null ? loc.getRegionID() : -1;
     }
 
     public List<Node> getNeighbors(Node node, VisitedTiles visited, PathfinderConfig config, Set<Integer> targets) {
@@ -214,14 +290,15 @@ public class CollisionMap {
                     continue;
                 }
                 int cost = config.getDistanceBeforeUsingTeleport() + transport.getDuration();
-                neighbors.add(new TransportNode(transport.getDestination(), node, cost));
+                neighbors.add(new TransportNode(transport.getDestination(), node, cost, transport));
                 if (isMoa) {
                     moaAddedHere++;
                     if (moaCosts == null) moaCosts = new ArrayList<>();
                     moaCosts.add(cost);
                 }
             } else {
-                neighbors.add(new TransportNode(transport.getDestination(), node, transport.getDuration()));
+                neighbors.add(new TransportNode(
+                        transport.getDestination(), node, transport.getDuration(), transport));
             }
             //END microbot variables
         }
@@ -321,9 +398,10 @@ public class CollisionMap {
                     if (config.isIgnoreTeleportAndItems()) {
                         continue;
                     }
-                    neighbors.add(new TransportNode(origin, node, config.getDistanceBeforeUsingTeleport() + transport.getDuration()));
+                    neighbors.add(new TransportNode(origin, node,
+                            config.getDistanceBeforeUsingTeleport() + transport.getDuration(), transport));
                 } else {
-                    neighbors.add(new TransportNode(origin, node, transport.getDuration()));
+                    neighbors.add(new TransportNode(origin, node, transport.getDuration(), transport));
                 }
             }
         }

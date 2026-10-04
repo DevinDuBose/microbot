@@ -3,10 +3,24 @@ package net.runelite.client.plugins.microbot.shortestpath;
 import net.runelite.client.config.*;
 
 import java.awt.*;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 
 @ConfigGroup(ShortestPathPlugin.CONFIG_GROUP)
-@ConfigInformation("Press 'CTRL + X' to stop the webwalker automatically.")
+@ConfigInformation("Toggle walking pauses/resumes manual walking. Clear current path removes the destination (default: Ctrl + X).")
 public interface ShortestPathConfig extends Config {
+    @ConfigItem(keyName = "toggleWalkingHotkey", name = "Toggle walking",
+            description = "Enable or disable manual automatic walking, keeping the destination and route.", position = -2)
+    default Keybind toggleWalkingHotkey() {
+        return Keybind.NOT_SET;
+    }
+
+    @ConfigItem(keyName = "clearCurrentPathHotkey", name = "Clear current path",
+            description = "Cancel walking and remove the current route and destination.", position = -1)
+    default Keybind clearCurrentPathHotkey() {
+        return new Keybind(KeyEvent.VK_X, InputEvent.CTRL_DOWN_MASK);
+    }
+
     /* ------------------------------------------------------------------
      * Hotkeys — stored as config values but bound/displayed inline on
      * each side-panel category card (see ShortestPathPanel). Marked
@@ -408,6 +422,17 @@ public interface ShortestPathConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "usePortalNexus",
+            name = "Use Portal Nexus",
+            description = "Include Portal Nexus destinations saved in PoH Web Config. Requires Player-owned-house Teleports.",
+            position = 24,
+            section = sectionSettings
+    )
+    default boolean usePortalNexus() {
+        return true;
+    }
+
+    @ConfigItem(
             keyName = "cancelInstead",
             name = "Cancel instead of recalculating",
             description = "Whether the path should be cancelled rather than recalculated " +
@@ -695,6 +720,18 @@ public interface ShortestPathConfig extends Config {
     default boolean drawDebugPanel() {
         return false;
     }
+
+    @ConfigItem(
+            keyName = "verboseWalkerLogging",
+            name = "Verbose console logging",
+            description = "Log walker/shortest-path DEBUG detail to the console without restarting the client "
+                    + "in debug mode. Console only — never the game chat.",
+            position = 3,
+            section = sectionDebug
+    )
+    default boolean verboseWalkerLogging() {
+        return false;
+    }
     @ConfigSection(
             name = "Advanced Options",
             description = "Advanced pathfinding and transport settings",
@@ -740,17 +777,6 @@ public interface ShortestPathConfig extends Config {
         return 80;
     }
 
-    @ConfigItem(
-            keyName = "preferNonConsumableTeleportAndSpells",
-            name = "Prefer  non-consumable teleports and spells",
-            description = " Whether to prefer using non-consumable teleportation items and spells over consumable items.<br>" +
-                    "This will only apply when 'Walk with banked transports' is enabled",
-            position = 3,
-            section = sectionAdvanced
-    )
-    default boolean preferNonConsumableTeleportAndSpells() {
-        return false;
-    }
         @ConfigItem(
                 keyName = "preferTransportToTarget",
                 name = "Prefer transport to target",
@@ -762,6 +788,20 @@ public interface ShortestPathConfig extends Config {
         default boolean preferTransportToTarget() {
                 return false;
         }
+
+    @ConfigItem(
+            keyName = "interactWithRouteObstaclesAtRange",
+            name = "Interact with obstacles at range",
+            description = "Click doors, stairs, ladders, stiles and other object transports as soon as they are in "
+                    + "range and let the game walk you there, instead of walking to a chosen approach tile "
+                    + "first. Only ever applies to the NEXT obstacle on the route, and falls back to the old "
+                    + "behaviour for any obstacle the server declines to path to.",
+            position = 3,
+            section = sectionAdvanced
+    )
+    default boolean interactWithRouteObstaclesAtRange() {
+        return true;
+    }
 
     @ConfigItem(
             keyName = "maxSimilarTransportDistance",
@@ -867,4 +907,40 @@ public interface ShortestPathConfig extends Config {
     default boolean reloadTransportDefinitions() {
         return false;
     }
+
+    @ConfigItem(
+            keyName = "useLiveCollision",
+            name = "Live collision",
+            description = "Overlay RuneLite's live scene collision on the static map inside the loaded scene, so pathfinding reflects opened/closed doors, gates and temporary objects, and learns real blocked edges as you travel (persisted, self-invalidating). Out-of-scene routing still uses the static map.",
+            position = 1,
+            section = sectionDeveloper
+    )
+    default boolean useLiveCollision() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "resetLearnedCollision",
+            name = "Reset learned collision",
+            description = "Turn ON to wipe the accumulated live-collision store — both in memory and on disk (~/.runelite/microbot/live-collision). Saves OFF automatically. Use if a bad capture ever corrupts routing; with Live collision still ON it re-learns from scratch as you travel.",
+            position = 2,
+            section = sectionDeveloper
+    )
+    default boolean resetLearnedCollision() {
+        return false;
+    }
+
+	@ConfigItem(
+			keyName = "plannerSelectionMode",
+			name = "Planner rollout mode",
+			description = "Local is the production default. Shadow compares the pinned upstream planner. "
+					+ "The F2P canary selects only semantically matching upstream routes and automatically "
+					+ "falls back to local; members routes remain local.",
+			position = 3,
+			section = sectionDeveloper,
+			hidden = true
+	)
+	default PlannerSelectionMode plannerSelectionMode() {
+		return PlannerSelectionMode.LOCAL;
+	}
 }

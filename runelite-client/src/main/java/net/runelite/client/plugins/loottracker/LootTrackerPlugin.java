@@ -72,6 +72,7 @@ import net.runelite.api.ItemContainer;
 import net.runelite.api.MenuAction;
 import net.runelite.api.MessageNode;
 import net.runelite.api.NPCComposition;
+import net.runelite.api.ParamID;
 import net.runelite.api.Player;
 import net.runelite.api.ScriptID;
 import net.runelite.api.Skill;
@@ -159,6 +160,10 @@ public class LootTrackerPlugin extends Plugin
 		ItemID.WILDY_LOOT_KEY4
 	);
 
+	// Port/Courier tasks and bags
+	private static final String COURIER_TASK_REWARD_EVENT = "Courier tasks";
+	private static final String COURIER_TASK_COMPLETE_MESSAGE = "and complete your courier task!";
+
 	// Herbiboar loot handling
 	@VisibleForTesting
 	static final String HERBIBOAR_LOOTED_MESSAGE = "You harvest herbs from the herbiboar, whereupon it escapes.";
@@ -171,6 +176,21 @@ public class LootTrackerPlugin extends Plugin
 
 	// Shipwreck salvaging
 	private static final Pattern SALVAGE_PATTERN = Pattern.compile("You sort through the\\s+(?<tier>\\S+)\\s+salvage.*");
+
+	// Wyrmscraig golem crafting
+	private static final Pattern GOLEM_CRAFTING_PATTERN = Pattern.compile(
+		"As you complete the golem it leaves a gift " +
+		"(?:on the ground|in your gem (?:bag|sack)) for you: 1 x " +
+		"(?<item>Uncut diamond|Uncut emerald|Uncut ruby|Uncut sapphire|Jeweller's chisel)\\.?$");
+
+	static final String GOLEM_CRAFTING_EVENT = "Golem Crafting";
+	private static final Map<String, Integer> GOLEM_CRAFTING_REWARDS = Map.of(
+		"Uncut diamond", ItemID.UNCUT_DIAMOND,
+		"Uncut emerald", ItemID.UNCUT_EMERALD,
+		"Uncut ruby", ItemID.UNCUT_RUBY,
+		"Uncut sapphire", ItemID.UNCUT_SAPPHIRE,
+		"Jeweller's chisel", ItemID.JEWELLERS_CHISEL
+	);
 
 	// Seed Pack loot handling
 	private static final String SEEDPACK_EVENT = "Seed pack";
@@ -269,14 +289,14 @@ public class LootTrackerPlugin extends Plugin
 	// Birdhouses
 	private static final Pattern BIRDHOUSE_PATTERN = Pattern.compile("You dismantle and discard the trap, retrieving (?:(?:a|\\d{1,2}) nests?, )?10 dead birds, \\d{1,3} feathers and (\\d,?\\d{1,3}) Hunter XP\\.");
 	private static final Map<Integer, String> BIRDHOUSE_XP_TO_TYPE = new ImmutableMap.Builder<Integer, String>().
-		put(280, "Regular Bird House").
-		put(420, "Oak Bird House").
-		put(560, "Willow Bird House").
-		put(700, "Teak Bird House").
-		put(820, "Maple Bird House").
-		put(960, "Mahogany Bird House").
-		put(1020, "Yew Bird House").
-		put(1140, "Magic Bird House").
+		put(112, "Regular Bird House").
+		put(168, "Oak Bird House").
+		put(224, "Willow Bird House").
+		put(280, "Teak Bird House").
+		put(369, "Maple Bird House").
+		put(480, "Mahogany Bird House").
+		put(612, "Yew Bird House").
+		put(969, "Magic Bird House").
 		put(1200, "Redwood Bird House").
 		build();
 
@@ -333,6 +353,13 @@ public class LootTrackerPlugin extends Plugin
 
 	private static final String DOM = "Doom of Mokhaiotl";
 
+	private static final String MAGGOT_KING = "Maggot King";
+	private static final String MAGGOT_KING_TAKE_EGGS_SUPPLY_MESSAGE = "A pile of half digested food spills out as you try to take the eggs.";
+	private static final String MAGGOT_KING_TAKE_EGGS_NO_LOOT_MESSAGE = "The eggs pop as you try to take them.";
+	private static final String MAGGOT_KING_POP_EGG_NO_LOOT_MESSAGE = "The egg pops and reveals a dead maggot.";
+
+	private static final Pattern TARNISHED_PATTERN = Pattern.compile("You rub the tarnished (?<type>.+) on your clothes.*");
+
 	private static final Set<Character> VOWELS = ImmutableSet.of('a', 'e', 'i', 'o', 'u');
 
 	@Inject
@@ -386,6 +413,7 @@ public class LootTrackerPlugin extends Plugin
 	private boolean lastLoadingIntoInstance;
 	private String lastPickpocketTarget;
 	private int ignorePickpocketLoot;
+	private int lastMaggotEggPopped;
 
 	private List<String> ignoredItems = new ArrayList<>();
 	private List<String> ignoredEvents = new ArrayList<>();
@@ -683,10 +711,13 @@ public class LootTrackerPlugin extends Plugin
 
 	void addLoot(@NonNull String name, int combatLevel, LootRecordType type, Object metadata, Collection<ItemStack> items, int amount)
 	{
-		initLoot(type, name);
+		if (!items.isEmpty())
+		{
+			initLoot(type, name);
 
-		final LootTrackerItem[] entries = buildEntries(stack(items));
-		SwingUtilities.invokeLater(() -> panel.add(name, type, combatLevel, entries, amount));
+			final LootTrackerItem[] entries = buildEntries(stack(items));
+			SwingUtilities.invokeLater(() -> panel.add(name, type, combatLevel, entries, amount));
+		}
 
 		LootRecord lootRecord = new LootRecord(name, type, metadata, toGameItems(items), Instant.now(), getLootWorldId(), amount, null);
 		synchronized (queuedLoots)
@@ -745,6 +776,10 @@ public class LootTrackerPlugin extends Plugin
 				"plane", location.getPlane(),
 				"world", client.getWorld()
 			);
+		}
+		else if (npc.getName() != null && npc.getName().equals(MAGGOT_KING))
+		{
+			return Map.of("item", lastMaggotEggPopped);
 		}
 		else
 		{
@@ -910,7 +945,7 @@ public class LootTrackerPlugin extends Plugin
 			long totalValue = items.stream()
 				.filter(item -> item.getId() > -1)
 				.mapToLong(item -> config.priceType() == LootTrackerPriceType.GRAND_EXCHANGE ?
-					(long) itemManager.getItemPrice(item.getId()) * item.getQuantity() :
+					itemManager.getItemPrice(item.getId()) * item.getQuantity() :
 					(long) itemManager.getItemComposition(item.getId()).getHaPrice() * item.getQuantity())
 				.sum();
 
@@ -1048,6 +1083,33 @@ public class LootTrackerPlugin extends Plugin
 			return;
 		}
 
+		final Matcher golemCraftingMatcher = GOLEM_CRAFTING_PATTERN.matcher(Text.removeTags(message));
+		if (golemCraftingMatcher.find())
+		{
+			final String itemName = golemCraftingMatcher.group("item");
+			final Integer itemId = GOLEM_CRAFTING_REWARDS.get(itemName);
+			if (itemId != null)
+			{
+				addLoot(GOLEM_CRAFTING_EVENT, -1, LootRecordType.EVENT, null, List.of(new ItemStack(itemId, 1)));
+			}
+			return;
+		}
+
+		if (message.endsWith(COURIER_TASK_COMPLETE_MESSAGE))
+		{
+			onInvChange((invItems, groundItems, removedItems) ->
+			{
+				int cnt = invItems.stream().
+					filter(item -> item.getId() != ItemID.SAILING_PAINT_SHARK).
+					mapToInt(ItemStack::getQuantity).
+					sum();
+				if (cnt > 0)
+				{
+					addLoot(COURIER_TASK_REWARD_EVENT, -1, LootRecordType.EVENT, null, invItems, cnt);
+				}
+			});
+		}
+
 		if (message.equals(HERBIBOAR_LOOTED_MESSAGE))
 		{
 			if (processHerbiboarHerbSackLoot(event.getTimestamp()))
@@ -1151,6 +1213,49 @@ public class LootTrackerPlugin extends Plugin
 			return;
 		}
 
+		final Matcher tarnishedMatcher = TARNISHED_PATTERN.matcher(message);
+		if (tarnishedMatcher.matches())
+		{
+			final String type = tarnishedMatcher.group("type").toLowerCase();
+			String eventType;
+			switch (type)
+			{
+				case "2h sword":
+					eventType = itemManager.getItemComposition(ItemID.TARNISHED_2H_SWORD).getMembersName();
+					break;
+				case "amulet":
+					eventType = itemManager.getItemComposition(ItemID.TARNISHED_AMULET).getMembersName();
+					break;
+				case "battleaxe":
+					eventType = itemManager.getItemComposition(ItemID.TARNISHED_BATTLEAXE).getMembersName();
+					break;
+				case "halberd":
+					eventType = itemManager.getItemComposition(ItemID.TARNISHED_HALBERD).getMembersName();
+					break;
+				case "longsword":
+					eventType = itemManager.getItemComposition(ItemID.TARNISHED_LONGSWORD).getMembersName();
+					break;
+				case "necklace":
+					eventType = itemManager.getItemComposition(ItemID.TARNISHED_NECKLACE).getMembersName();
+					break;
+				case "ring":
+					eventType = itemManager.getItemComposition(ItemID.TARNISHED_RING).getMembersName();
+					break;
+				case "spear":
+					eventType = itemManager.getItemComposition(ItemID.TARNISHED_SPEAR).getMembersName();
+					break;
+				case "bracelet":
+					eventType = itemManager.getItemComposition(ItemID.TARNISHED_BRACELET).getMembersName();
+					break;
+				default:
+					log.debug("Unrecognized tarnished item: {}", type);
+					return;
+			}
+
+			onInvChange(collectInvItems(LootRecordType.EVENT, eventType, client.getBoostedSkillLevel(Skill.CRAFTING)));
+			return;
+		}
+
 		if (regionID == TEMPOROSS_REGION && message.startsWith(TEMPOROSS_LOOT_STRING))
 		{
 			onInvChange(collectInvItems(LootRecordType.EVENT, TEMPOROSS_EVENT, client.getBoostedSkillLevel(Skill.FISHING)));
@@ -1194,22 +1299,38 @@ public class LootTrackerPlugin extends Plugin
 		{
 			countChangedItems(ItemID.RUBIUM_GEODE, client.getBoostedSkillLevel(Skill.MINING));
 		}
+		else if (message.equals(MAGGOT_KING_TAKE_EGGS_SUPPLY_MESSAGE)
+			|| message.equals(MAGGOT_KING_TAKE_EGGS_NO_LOOT_MESSAGE))
+		{
+			addLoot(MAGGOT_KING, -1, LootRecordType.UNKNOWN, Map.of("message", message), Collections.emptyList(), 1);
+		}
+		else if (message.equals(MAGGOT_KING_POP_EGG_NO_LOOT_MESSAGE))
+		{
+			addLoot(MAGGOT_KING, -1, LootRecordType.UNKNOWN, Map.of("message", message, "item", lastMaggotEggPopped), Collections.emptyList(), 1);
+		}
 	}
 
 	private void countChangedItems(int itemId, Object metadata)
 	{
-		onInvChange((((invItems, groundItems, removedItems) ->
+		countChangedItems(itemId, metadata, null);
+	}
+
+	private void countChangedItems(int itemId, Object metadata, @Nullable String nameOverride)
+	{
+		onInvChange((invItems, groundItems, removedItems) ->
 		{
 			int cnt = removedItems.count(itemId);
 			if (cnt > 0)
 			{
-				String name = itemManager.getItemComposition(itemId).getMembersName();
+				String name = nameOverride != null ?
+					nameOverride :
+					itemManager.getItemComposition(itemId).getMembersName();
 				List<ItemStack> combined = new ArrayList<>();
 				combined.addAll(invItems);
 				combined.addAll(groundItems);
 				addLoot(name, -1, LootRecordType.EVENT, metadata, combined, cnt);
 			}
-		})));
+		});
 	}
 
 	@Subscribe
@@ -1348,7 +1469,7 @@ public class LootTrackerPlugin extends Plugin
 							put("HERBLORE", client.getBoostedSkillLevel(Skill.HERBLORE)).
 							put("HUNTER", client.getBoostedSkillLevel(Skill.HUNTER)).
 							build();
-						onInvChange((((invItems, groundItems, removedItems) ->
+						onInvChange((invItems, groundItems, removedItems) ->
 						{
 							int cnt = removedItems.count(itemId);
 							if (cnt > 0)
@@ -1356,7 +1477,35 @@ public class LootTrackerPlugin extends Plugin
 								String name = itemManager.getItemComposition(itemId).getMembersName();
 								addLoot(name, -1, LootRecordType.EVENT, levels, invItems, cnt);
 							}
-						})));
+						});
+						break;
+					default:
+						int eventItemId = event.getItemId();
+						ItemComposition itemComposition = client.getItemDefinition(eventItemId);
+
+						if (itemComposition.getIntValue(ParamID.COURIER_BAG_TIER) >= 0)
+						{
+							String itemName = itemComposition.getMembersName();
+							// reward bag with location, else coin bag
+							if (itemName.indexOf(" (") > 0)
+							{
+								itemName = itemName.substring(0, itemName.indexOf(" ("));
+							}
+							countChangedItems(eventItemId, eventItemId, itemName);
+						}
+				}
+			}
+			else if (event.getMenuOption().equals("Pop"))
+			{
+				switch (event.getItemId())
+				{
+					case ItemID.MAGGOT_EGG:
+					case ItemID.SICKLY_MAGGOT_EGG:
+					case ItemID.WARM_MAGGOT_EGG:
+					case ItemID.PULSATING_MAGGOT_EGG:
+					case ItemID.WRIGGLING_MAGGOT_EGG:
+					case ItemID.WRITHING_MAGGOT_EGG:
+						lastMaggotEggPopped = event.getItemId();
 						break;
 				}
 			}
@@ -1403,6 +1552,10 @@ public class LootTrackerPlugin extends Plugin
 		Map<ConfigLoot, ConfigLoot> map = new HashMap<>();
 		for (LootRecord record : records)
 		{
+			if (record.getDrops().isEmpty())
+			{
+				continue;
+			}
 			ConfigLoot key = new ConfigLoot(record.getType(), record.getEventId());
 			ConfigLoot loot = map.computeIfAbsent(key, k -> key);
 			loot.kills += record.getAmount();
@@ -1595,7 +1748,7 @@ public class LootTrackerPlugin extends Plugin
 	private LootTrackerItem buildLootTrackerItem(int itemId, int quantity)
 	{
 		final ItemComposition itemComposition = itemManager.getItemComposition(itemId);
-		final int gePrice = itemManager.getItemPrice(itemId);
+		final long gePrice = itemManager.getItemPrice(itemId);
 		final int haPrice = itemComposition.getHaPrice();
 		final boolean ignored = ignoredItems.contains(itemComposition.getMembersName());
 
@@ -1656,7 +1809,7 @@ public class LootTrackerPlugin extends Plugin
 	{
 		long totalPrice = items.stream()
 			.mapToLong(item -> config.priceType() == LootTrackerPriceType.GRAND_EXCHANGE ?
-				(long) itemManager.getItemPrice(item.getId()) * item.getQuantity() :
+				itemManager.getItemPrice(item.getId()) * item.getQuantity() :
 				(long) itemManager.getItemComposition(item.getId()).getHaPrice() * item.getQuantity())
 			.sum();
 

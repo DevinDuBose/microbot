@@ -58,7 +58,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import javax.annotation.Nullable;
-import javax.inject.Provider;
 import javax.inject.Singleton;
 import javax.management.ObjectName;
 import javax.net.ssl.SSLContext;
@@ -90,9 +89,6 @@ import net.runelite.client.ui.ClientUI;
 import net.runelite.client.ui.FatalErrorDialog;
 import net.runelite.client.ui.SplashScreen;
 import net.runelite.client.ui.overlay.OverlayManager;
-import net.runelite.client.ui.overlay.WidgetOverlay;
-import net.runelite.client.ui.overlay.tooltip.TooltipOverlay;
-import net.runelite.client.ui.overlay.worldmap.WorldMapOverlay;
 import net.runelite.client.util.OSType;
 import net.runelite.client.util.ReflectUtil;
 import net.runelite.client.util.CrashReportFormatter;
@@ -147,6 +143,7 @@ public class RuneLite
 	public static final File DEFAULT_SESSION_FILE = new File(RUNELITE_DIR, "session");
 	public static final File NOTIFICATIONS_DIR = new File(RuneLite.RUNELITE_DIR, "notifications");
 	public static final File FONTS_DIR = new File(RuneLite.RUNELITE_DIR, "fonts");
+	public static final Path PLUGIN_DATA = new File(RuneLite.RUNELITE_DIR, "plugin-data").toPath();
 
 	private static final int MAX_OKHTTP_CACHE_SIZE = 20 * 1024 * 1024; // 20mb
 	public static String USER_AGENT = "RuneLite/" + RuneLiteProperties.getVersion();
@@ -180,12 +177,6 @@ public class RuneLite
 
 	@Inject
 	private OverlayManager overlayManager;
-
-	@Inject
-	private Provider<TooltipOverlay> tooltipOverlay;
-
-	@Inject
-	private Provider<WorldMapOverlay> worldMapOverlay;
 
 	@Inject
 	private Gson gson;
@@ -531,9 +522,7 @@ public class RuneLite
 		eventBus.register(discordService);
 
 		// Add core overlays
-		WidgetOverlay.createOverlays(overlayManager, client).forEach(overlayManager::add);
-		overlayManager.add(worldMapOverlay.get());
-		overlayManager.add(tooltipOverlay.get());
+		overlayManager.init();
 
 		// Start plugins
 		pluginManager.startPlugins();
@@ -610,14 +599,19 @@ public class RuneLite
 			.addInterceptor(chain ->
 			{
 				Request request = chain.request();
-				if (request.header("User-Agent") != null)
+				var ua = request.header("User-Agent");
+				if (ua == null)
 				{
-					return chain.proceed(request);
+					ua = USER_AGENT;
+				}
+				else if (!ua.startsWith("RuneLite"))
+				{
+					ua = USER_AGENT + " " + ua;
 				}
 
 				Request userAgentRequest = request
 					.newBuilder()
-					.header("User-Agent", USER_AGENT)
+					.header("User-Agent", ua)
 					.build();
 				return chain.proceed(userAgentRequest);
 			})

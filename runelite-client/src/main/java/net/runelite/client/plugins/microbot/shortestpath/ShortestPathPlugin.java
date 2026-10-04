@@ -43,7 +43,6 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.events.PluginMessage;
 import net.runelite.client.game.SpriteManager;
-import net.runelite.client.input.KeyListener;
 import net.runelite.client.input.KeyManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
@@ -51,10 +50,19 @@ import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.CollisionMap;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.Pathfinder;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.PathfinderConfig;
+import net.runelite.client.plugins.microbot.util.walker.WebWalkLog;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionCapture;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionConflicts;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionOverlay;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionPersistence;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionView;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionSnapshot;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveRouteValidator;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.SplitFlagMap;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.tile.Rs2Tile;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
+import net.runelite.client.plugins.microbot.util.walker.Rs2TransportPlanningPolicy;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.JagexColors;
 import net.runelite.client.ui.NavigationButton;
@@ -67,7 +75,6 @@ import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.Text;
 
 import java.awt.*;
-import java.awt.event.KeyEvent;
 import java.awt.geom.Ellipse2D;
 import java.awt.image.BufferedImage;
 import java.util.List;
@@ -84,10 +91,17 @@ import java.util.regex.Pattern;
         name = PluginDescriptor.Mocrosoft + "Web Walker",
         description = "Draws the shortest path to a chosen destination on the map (right click a spot on the world map to use)",
         tags = {"pathfinder", "map", "waypoint", "navigation", "microbot"},
-        enabledByDefault = true,
+        enabledByDefault = false,
+        version = "1.0.2",
         alwaysOn = true
 )
-public class ShortestPathPlugin extends Plugin implements KeyListener {
+public class ShortestPathPlugin extends Plugin {
+    private static final java.util.concurrent.atomic.AtomicLong pathRequestRevision = new java.util.concurrent.atomic.AtomicLong();
+
+    static void invalidatePendingPathfinding() {
+        pathRequestRevision.incrementAndGet();
+    }
+
     public static final String CONFIG_GROUP = "shortestpath";
     private static final String PLUGIN_MESSAGE_PATH = "path";
     private static final String PLUGIN_MESSAGE_CLEAR = "clear";
@@ -137,6 +151,9 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
     @Inject
     private ETAOverlayPanel etaOverlayPanel;
+
+    @Inject
+    private WalkingNoticeOverlay walkingNoticeOverlay;
 
     @Inject
     private SpriteManager spriteManager;
@@ -211,14 +228,25 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         return configManager.getConfig(ShortestPathConfig.class);
     }
 
+    public ShortestPathPlugin() {
+    }
+
+    public ShortestPathPlugin(WalkingNoticeOverlay walkingNoticeOverlay) {
+        this.walkingNoticeOverlay = walkingNoticeOverlay;
+    }
+
     @Override
     protected void startUp() {
 		cacheConfigValues();
+        applyVerboseWalkerLogging(config.verboseWalkerLogging());
         SplitFlagMap map = SplitFlagMap.fromResources();
+        staticCollisionData = map;
         Map<WorldPoint, Set<Transport>> transports = Transport.loadAllFromResources();
 
         List<Restriction> restrictions = Restriction.loadAllFromResources();
-        pathfinderConfig = new PathfinderConfig(map, transports, restrictions, client, config);
+        pathfinderConfig = new PathfinderConfig(
+                map, transports, restrictions, client, config,
+                Rs2TransportPlanningPolicy.INSTANCE);
 
         panel = injector.getInstance(ShortestPathPanel.class);
         pohPanel = new PohPanel(config);
@@ -241,9 +269,10 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         clientToolbar.addNavigation(pohNavButton);
 
         Rs2Walker.setConfig(config);
-        shortestPathScript = new ShortestPathScript();
+        shortestPathScript = new ShortestPathScript(this::setTarget, this::showWalkingNotice);
         shortestPathScript.run(config);
 
+        overlayManager.add(walkingNoticeOverlay);
         overlayManager.add(pathOverlay);
         overlayManager.add(pathMinimapOverlay);
         overlayManager.add(pathMapOverlay);
@@ -255,7 +284,8 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         if (config.drawDebugPanel()) {
             overlayManager.add(debugOverlayPanel);
         }
-        keyManager.registerKeyListener(this);
+        keyManager.registerKeyListener(toggleWalkingHotkeyListener);
+        keyManager.registerKeyListener(clearCurrentPathHotkeyListener);
         keyManager.registerKeyListener(customLocationHotkeyListener);
         keyManager.registerKeyListener(bankHotkeyListener);
         keyManager.registerKeyListener(nearestBankHotkeyListener);
@@ -282,8 +312,20 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         keyManager.unregisterKeyListener(nearestBankHotkeyListener);
         keyManager.unregisterKeyListener(bankHotkeyListener);
         keyManager.unregisterKeyListener(customLocationHotkeyListener);
-        keyManager.unregisterKeyListener(this);
+        keyManager.unregisterKeyListener(toggleWalkingHotkeyListener);
+        keyManager.unregisterKeyListener(clearCurrentPathHotkeyListener);
 
+        // Flush any live-collision the last capture learned and stop the I/O thread.
+        if (liveCollisionPersistence != null) {
+            if (pathfinderConfig != null) {
+                liveCollisionPersistence.persist(pathfinderConfig.getLiveCollisionOverlay().drainDirty());
+            }
+            liveCollisionPersistence.shutdown();
+            liveCollisionPersistence = null;
+        }
+
+        overlayManager.remove(walkingNoticeOverlay);
+        walkingNoticeOverlay.clear();
         overlayManager.remove(pathOverlay);
         overlayManager.remove(pathMinimapOverlay);
         overlayManager.remove(pathMapOverlay);
@@ -307,19 +349,23 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
     //Method from microbot
     public static void exit() {
+        invalidatePendingPathfinding();
         if (pathfindingExecutor != null) {
-            Rs2Walker.setTarget(null);
+            Rs2Walker.clearWalkingRoute("shortest-path-plugin:exit");
             pathfindingExecutor.shutdownNow();
             pathfindingExecutor = null;
         }
     }
 
     public void restartPathfinding(WorldPoint start, Set<WorldPoint> ends, boolean canReviveFiltered) {
+        final long requestRevision = pathRequestRevision.incrementAndGet();
         ExecutorService executor;
         synchronized (pathfinderMutex) {
             if (pathfinder != null) {
                 pathfinder.cancel();
-                pathfinderFuture.cancel(true);
+                if (pathfinderFuture != null) {
+                    pathfinderFuture.cancel(true);
+                }
             }
 
             if ((executor = pathfindingExecutor) == null) {
@@ -332,12 +378,18 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         final ExecutorService finalExecutor = executor;
         final long scheduleTime = System.currentTimeMillis();
         getClientThread().invokeLater(() -> {
+            if (pathRequestRevision.get() != requestRevision || finalExecutor.isShutdown()) {
+                return;
+            }
             long invokeLaterDelay = System.currentTimeMillis() - scheduleTime;
             long refreshStart = System.currentTimeMillis();
             pathfinderConfig.refresh();
             long refreshTime = System.currentTimeMillis() - refreshStart;
             pathfinderConfig.filterLocations(ends, canReviveFiltered);
             synchronized (pathfinderMutex) {
+                if (pathRequestRevision.get() != requestRevision || finalExecutor.isShutdown()) {
+                    return;
+                }
                 if (ends.isEmpty()) {
                     setTarget(null);
                 } else {
@@ -383,11 +435,33 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
             "walkWithBankedTransports",
             "minBankRouteSavings",
             "bankTripWhenCacheUnavailable",
-            "preferNonConsumableTeleportAndSpells",
             "preferTransportToTarget",
-            "maxSimilarTransportDistance"
+            "maxSimilarTransportDistance",
+            "plannerSelectionMode"
     );
     private static final String RELOAD_TRANSPORT_DEFINITIONS_KEY = "reloadTransportDefinitions";
+    private static final String RESET_LEARNED_COLLISION_KEY = "resetLearnedCollision";
+
+    /**
+     * Logger packages the "Verbose console logging" debug toggle controls. Setting them to DEBUG at
+     * runtime surfaces the walker's debug detail (walkerDiag, partial_seg, interim continuation clicks,
+     * pathfinder diagnostics) in the console without restarting the client with a debug logback config.
+     * Console only: GameChatAppender's chat mirror has its own WARN threshold and is unaffected.
+     */
+    private static final String[] VERBOSE_WALKER_LOGGER_PACKAGES = {
+            "net.runelite.client.plugins.microbot.util.walker",
+            "net.runelite.client.plugins.microbot.shortestpath"
+    };
+
+    private static void applyVerboseWalkerLogging(boolean verbose) {
+        for (String pkg : VERBOSE_WALKER_LOGGER_PACKAGES) {
+            ch.qos.logback.classic.Logger logger =
+                    (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(pkg);
+            // null = inherit the parent level (normal INFO); DEBUG opts the subtree in.
+            logger.setLevel(verbose ? ch.qos.logback.classic.Level.DEBUG : null);
+        }
+        log.info("[ShortestPath] verbose walker console logging {}", verbose ? "enabled" : "disabled");
+    }
     private final Pattern TRANSPORT_OPTIONS_REGEX = Pattern.compile("^use\\w+$");
 
     @Subscribe
@@ -400,6 +474,11 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
 		// Reset config in Rs2Walker when changed
 		Rs2Walker.setConfig(config);
+
+        if ("verboseWalkerLogging".equals(event.getKey())) {
+            applyVerboseWalkerLogging(config.verboseWalkerLogging());
+            return;
+        }
 
         if ("drawDebugPanel".equals(event.getKey())) {
             if (config.drawDebugPanel()) {
@@ -416,6 +495,16 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
             } else {
                 overlayManager.remove(etaOverlayPanel);
             }
+            return;
+        }
+
+        // One-shot developer action: wipe everything the live overlay has learned (memory + disk).
+        if (RESET_LEARNED_COLLISION_KEY.equals(event.getKey()) && Boolean.parseBoolean(event.getNewValue())) {
+            resetLearnedCollision();
+            if (pathfinder != null) {
+                restartPathfinding(pathfinder.getStart(), pathfinder.getTargets());
+            }
+            configManager.setConfiguration(CONFIG_GROUP, RESET_LEARNED_COLLISION_KEY, false);
             return;
         }
 
@@ -563,11 +652,267 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         }
     }
 
+    // Scene base of the last live-collision capture, so the snapshot is only rebuilt when the scene
+    // actually reloads rather than every tick (avoids the per-tick allocation the design warns against).
+    private int lastLiveCaptureBaseX = Integer.MIN_VALUE;
+    private int lastLiveCaptureBaseY = Integer.MIN_VALUE;
+    // Static-vs-live conflict telemetry (log-only): the shipped map, kept for comparing each fresh
+    // capture, and a rate limit so frequent recaptures (every object spawn) log at most occasionally.
+    private SplitFlagMap staticCollisionData;
+    private long lastCollisionConflictLogAtMs;
+    private static final long COLLISION_CONFLICT_LOG_INTERVAL_MS = 30_000L;
+    // Set by object spawn/despawn events so a mid-scene change (door, temp object) triggers one recapture
+    // on the next tick. Debounced to at most one rebuild per tick regardless of how many objects changed.
+    private volatile boolean liveCollisionDirty = false;
+    // Kept set until the active route has actually been checked against the newest successful capture.
+    // This is intentionally separate from capture dirtiness: cooldown/pathfinder gates defer validation
+    // without losing it.
+    private boolean liveRouteValidationPending = false;
+    // Cooldown so a run of live changes cannot spam route recalculation.
+    private long lastLiveRecalcMs = 0L;
+    private static final long LIVE_RECALC_COOLDOWN_MS = 3000L;
+    // Only the next few tiles of the route matter — far-ahead changes are re-checked as the player nears
+    // them, and may clear before then.
+    private static final int LIVE_RECALC_LOOKAHEAD = 15;
+    // Disk backing for the accumulated live-collision store. Created when the flag is enabled (needs the
+    // client's cache revision as the invalidation key) and torn down when it is disabled or the plugin stops.
+    private LiveCollisionPersistence liveCollisionPersistence = null;
+
+    /** Flags the live-collision snapshot for rebuild. Cheap (a volatile write); fired from object events. */
+    private void markLiveCollisionDirty() {
+        liveCollisionDirty = true;
+    }
+
+    /**
+     * Wipes everything the live overlay has learned — the in-memory accumulation and the on-disk store for
+     * every cache revision — then forces an immediate recapture so, while the flag is still on, the store
+     * refills from scratch. The developer escape hatch for a bad capture that has corrupted routing.
+     */
+    /**
+     * Static-vs-live conflict telemetry: one throttled summary per capture window quantifying how much
+     * the live scene disagrees with the shipped map. Log-only — feeds the persistent-live-store
+     * decision with magnitudes instead of anecdotes. Runs off the fresh immutable snapshot, never on
+     * the pathfinder hot path.
+     */
+    private void logLiveStaticConflicts(LiveCollisionSnapshot snapshot, LiveCollisionView priorOverlayView) {
+        if (staticCollisionData == null) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastCollisionConflictLogAtMs < COLLISION_CONFLICT_LOG_INTERVAL_MS) {
+            return;
+        }
+        LiveCollisionConflicts.Tally tally = LiveCollisionConflicts.tally(snapshot, staticCollisionData);
+        if (tally.isEmpty() && tally.liveOpensSealed == 0) {
+            return;
+        }
+        lastCollisionConflictLogAtMs = now;
+        LiveCollisionConflicts.Coverage coverage =
+                LiveCollisionConflicts.coverage(snapshot, staticCollisionData, priorOverlayView);
+        WebWalkLog.spDebug("collision_conflict | liveOpensStatic={} liveBlocksStatic={} sealedOpens={} base={},{}"
+                        + " | overlayKnew={}% (known={} new={} changed={}) — live scene disagrees with the shipped map",
+                tally.liveOpensStatic, tally.liveBlocksStatic, tally.liveOpensSealed,
+                snapshot.getBaseX(), snapshot.getBaseY(),
+                coverage.alreadyKnownPercent(), coverage.alreadyKnown,
+                coverage.newInformation, coverage.changed);
+    }
+
+    private void resetLearnedCollision() {
+        if (pathfinderConfig != null) {
+            pathfinderConfig.getLiveCollisionOverlay().clear();
+        }
+        if (liveCollisionPersistence != null) {
+            liveCollisionPersistence.deleteAllAsync();
+        } else if (client != null) {
+            // Flag is off, so no active store — delete the on-disk tree via a transient handle.
+            final LiveCollisionPersistence tmpStore = new LiveCollisionPersistence(client.getRevision());
+            tmpStore.deleteAllAsync();
+            tmpStore.shutdownAsync();
+        }
+        lastLiveCaptureBaseX = Integer.MIN_VALUE;
+        lastLiveCaptureBaseY = Integer.MIN_VALUE;
+        liveCollisionDirty = true;
+        liveRouteValidationPending = false;
+        log.info("[ShortestPath] Live collision store reset (in-memory + disk)");
+    }
+
+    @Subscribe
+    public void onGameObjectSpawned(net.runelite.api.events.GameObjectSpawned event) {
+        markLiveCollisionDirty();
+    }
+
+    @Subscribe
+    public void onGameObjectDespawned(net.runelite.api.events.GameObjectDespawned event) {
+        markLiveCollisionDirty();
+    }
+
+    @Subscribe
+    public void onWallObjectSpawned(net.runelite.api.events.WallObjectSpawned event) {
+        markLiveCollisionDirty();
+    }
+
+    @Subscribe
+    public void onWallObjectDespawned(net.runelite.api.events.WallObjectDespawned event) {
+        markLiveCollisionDirty();
+    }
+
+    /**
+     * Keeps the shared live-collision overlay in step with the config flag and the loaded scene, and
+     * proactively recalculates the walker's route when a mid-scene change has blocked the road ahead.
+     * Runs on the client thread from {@link #onGameTick}. Rebuilds the immutable snapshot only when the
+     * scene base changes (a reload) or an object changed since the last rebuild.
+     */
+    void refreshLiveCollision() {
+        if (pathfinderConfig == null) {
+            return;
+        }
+        final LiveCollisionOverlay overlay = pathfinderConfig.getLiveCollisionOverlay();
+        final boolean enabled = config.useLiveCollision();
+        if (enabled != overlay.isEnabled()) {
+            overlay.setEnabled(enabled);
+            // Invalidate both base-axis values (as resetLearnedCollision does) so the next capture is
+            // forced regardless of which axis the base-change check reads first.
+            lastLiveCaptureBaseX = Integer.MIN_VALUE; // force a capture on enable, drop snapshot on disable
+            lastLiveCaptureBaseY = Integer.MIN_VALUE;
+            liveCollisionDirty = enabled;
+            liveRouteValidationPending = false;
+            if (enabled) {
+                // Seed the freshly enabled store with everything learned in earlier sessions for this cache
+                // revision, then let live captures accumulate on top.
+                if (liveCollisionPersistence == null) {
+                    liveCollisionPersistence = new LiveCollisionPersistence(client.getRevision());
+                }
+                liveCollisionPersistence.loadIntoAsync(overlay);
+            } else if (liveCollisionPersistence != null) {
+                liveCollisionPersistence.shutdown();
+                liveCollisionPersistence = null;
+            }
+        }
+        if (!enabled) {
+            liveCollisionDirty = false;
+            liveRouteValidationPending = false;
+            return;
+        }
+
+        final WorldView wv = client.getTopLevelWorldView();
+        if (wv == null) {
+            return;
+        }
+        final int baseX = wv.getBaseX();
+        final int baseY = wv.getBaseY();
+        final boolean baseChanged = baseX != lastLiveCaptureBaseX || baseY != lastLiveCaptureBaseY;
+        final boolean captureNeeded = baseChanged || liveCollisionDirty
+                || (overlay.current() == null && !wv.isInstance());
+        if (captureNeeded) {
+            final LiveCollisionSnapshot snapshot = LiveCollisionCapture.captureOnClientThread();
+            if (snapshot == null) {
+                // Do NOT clear: the overlay now accumulates every scene it has seen, so entering an
+                // instance or a transient loading gap must not discard already-learned regions. The static
+                // map is used for the instance simply because no accumulated region covers its coordinates.
+                if (wv.isInstance()) {
+                    // Instances intentionally use static collision. Latch this scene so we do not retry
+                    // every tick; leaving it changes the base or produces a non-instance capture request.
+                    lastLiveCaptureBaseX = baseX;
+                    lastLiveCaptureBaseY = baseY;
+                    liveCollisionDirty = false;
+                    liveRouteValidationPending = false;
+                } else {
+                    // Collision data can be briefly unavailable during loading. Keep the capture pending
+                    // and do not claim this scene base was successfully captured.
+                    liveCollisionDirty = true;
+                }
+                return;
+            }
+
+            // Pinned BEFORE the merge: this is what we knew on arrival, which is the only way to tell
+            // whether the persistent store spared us a blind first visit. mergeScene replaces regions
+            // rather than mutating them, so this view stays a true "before".
+            final LiveCollisionView priorOverlayView = overlay.current();
+            overlay.set(snapshot);
+            logLiveStaticConflicts(snapshot, priorOverlayView);
+            // Persist the regions this capture just changed so the learned collision survives a restart.
+            if (liveCollisionPersistence != null) {
+                liveCollisionPersistence.persist(overlay.drainDirty());
+            }
+            lastLiveCaptureBaseX = baseX;
+            lastLiveCaptureBaseY = baseY;
+            liveCollisionDirty = false;
+            // The newly trusted interior can invalidate a route which was calculated while those tiles
+            // were outside the old scene, so recenter captures need the same validation as object changes.
+            liveRouteValidationPending = true;
+        }
+
+        if (liveRouteValidationPending && validateRouteAgainstLiveCollision(overlay)) {
+            liveRouteValidationPending = false;
+        }
+    }
+
+    /**
+     * If the walker is mid-route and live collision now blocks a walking step within the look-ahead,
+     * restart pathfinding so it routes around before stalling into the block. Cooldown-gated. Openable
+     * doors and transports are skipped by {@link LiveRouteValidator} (door edges are unknown in the
+     * overlay, transport jumps are non-adjacent), so this does not fight the runtime door handler.
+     */
+    private boolean validateRouteAgainstLiveCollision(LiveCollisionOverlay overlay) {
+        if (overlay.current() == null || Rs2Walker.getCurrentTarget() == null) {
+            return true;
+        }
+        final long now = System.currentTimeMillis();
+        if (now - lastLiveRecalcMs < LIVE_RECALC_COOLDOWN_MS) {
+            return false;
+        }
+        final Pathfinder pf = ShortestPathPlugin.pathfinder;
+        if (pf == null || !pf.isDone()) {
+            return false;
+        }
+        final List<WorldPoint> path = pf.getPath();
+        if (path == null || path.size() < 2) {
+            return true;
+        }
+        final WorldPoint me = Rs2Player.getWorldLocation();
+        if (me == null) {
+            return false;
+        }
+
+        final CollisionMap map = pathfinderConfig.getMap();
+        map.beginSearch(); // pin the freshly captured snapshot for this validation
+        final int from = LiveRouteValidator.nearestIndex(path, me);
+        // A door transport joins two adjacent same-plane tiles, so to the validator its step looks
+        // like walking — and while the door is SHUT the edge honestly reads blocked. That is its
+        // normal state, not an obstruction: the walker's executor opens it on contact. Recalculating
+        // here yanked the route out from under the walker while it stood at the door handling it.
+        final int blocked = LiveRouteValidator.firstBlockedStep(path, from, LIVE_RECALC_LOOKAHEAD, map,
+                (a, b) -> {
+                    // The walker's door subsystem has claimed this edge — catalog or not. Quest doors
+                    // (fightarena_door1) are in no catalog, yet the recalc mid-interaction is just as
+                    // wrong there.
+                    if (Rs2Walker.isActiveDoorEdge(a, b)) {
+                        return true;
+                    }
+                    for (Transport t : pathfinderConfig.getTransportsPacked()
+                            .getOrDefault(WorldPointUtil.packWorldPoint(a), java.util.Collections.emptySet())) {
+                        if (b.equals(t.getDestination())) {
+                            return true;
+                        }
+                    }
+                    return false;
+                });
+        if (blocked >= 0) {
+            lastLiveRecalcMs = now;
+            log.debug("[LiveCollision] route step {} -> {} now blocked; recalculating",
+                    path.get(blocked), path.get(blocked + 1));
+            Rs2Walker.recalculatePath();
+        }
+        return true;
+    }
+
     @Subscribe
     public void onGameTick(GameTick tick) {
         handlePendingLoginRefresh();
+        refreshLiveCollision();
 
-        if (Rs2Walker.getCurrentTarget() != null) {
+        if ((shortestPathScript != null && !shortestPathScript.isWalkingEnabled())
+                || Rs2Walker.getCurrentTarget() != null) {
             return;
         }
 
@@ -711,6 +1056,15 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 		return defaultValue;
 	}
 
+	public static PlannerSelectionMode override(
+			String configOverrideKey, PlannerSelectionMode defaultValue) {
+		if (!configOverride.isEmpty()) {
+			return PlannerSelectionMode.fromConfigValue(
+					configOverride.get(configOverrideKey), defaultValue);
+		}
+		return defaultValue;
+	}
+
 	private TileCounter override(String configOverrideKey, TileCounter defaultValue) {
 		if (!configOverride.isEmpty()) {
 			Object value = configOverride.get(configOverrideKey);
@@ -753,7 +1107,7 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         }
 
         if (entry.getOption().equals(CLEAR) && entry.getTarget().equals(PATH)) {
-			shortestPathScript.setTriggerWalker(null);
+			shortestPathScript.setTriggerWalker(null, "menu:clear-path");
         }
     }
 
@@ -795,6 +1149,7 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
     private void setTargets(Set<WorldPoint> targets, boolean append) {
         if (targets == null || targets.isEmpty()) {
+            invalidatePendingPathfinding();
             synchronized (pathfinderMutex) {
                 if (pathfinder != null) {
                     pathfinder.cancel();
@@ -1049,32 +1404,45 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         }
     }
 
-    @Override
-    public void keyTyped(KeyEvent e) {
-
+    private void showWalkingNotice(ShortestPathScript.ManualWalkingNotice notice) {
+        final ShortestPathScript source = shortestPathScript;
+        getClientThread().invokeLater(() -> {
+            if (source != shortestPathScript || panel == null || !Microbot.isLoggedIn()) {
+                return;
+            }
+            String message = WalkingNoticeOverlay.messageFor(notice, config.toggleWalkingHotkey());
+            client.addChatMessage(net.runelite.api.ChatMessageType.GAMEMESSAGE, "", message, "");
+            walkingNoticeOverlay.show(message);
+        });
     }
 
-    @Override
-    public void keyPressed(KeyEvent e) {
-        if (client == null || !Microbot.isLoggedIn())
-        {
-            return;
+    public void toggleManualWalking() {
+        if (shortestPathScript != null) {
+            shortestPathScript.toggleWalking();
+            final boolean enabled = shortestPathScript.isWalkingEnabled();
+            javax.swing.SwingUtilities.invokeLater(() -> {
+                if (panel != null) {
+                    panel.updateWalkingState(enabled);
+                }
+            });
         }
-        /**
-         * We took decided to avoid "ESC" as this conflicts with the
-         * osrs keybindings and closing the world map
-         * Therefor CTRL + X seemed a bit more robust and userfriendly
-         */
-        if (e.getKeyCode() == KeyEvent.VK_X && e.isControlDown()) {
-			shortestPathScript.setTriggerWalker(null);
-            e.consume();
+    }
+
+    private final HotkeyListener toggleWalkingHotkeyListener = new HotkeyListener(() -> config.toggleWalkingHotkey()) {
+        @Override
+        public void hotkeyPressed() {
+            toggleManualWalking();
         }
-    }
+    };
 
-    @Override
-    public void keyReleased(KeyEvent e) {
-
-    }
+    private final HotkeyListener clearCurrentPathHotkeyListener = new HotkeyListener(() -> config.clearCurrentPathHotkey()) {
+        @Override
+        public void hotkeyPressed() {
+            if (shortestPathScript != null) {
+                shortestPathScript.setTriggerWalker(null, "hotkey:clear-current-path");
+            }
+        }
+    };
 
     private final HotkeyListener customLocationHotkeyListener = new HotkeyListener(() -> config.customLocationToggleHotkey()) {
         @Override

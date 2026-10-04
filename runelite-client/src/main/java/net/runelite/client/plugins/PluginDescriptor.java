@@ -35,14 +35,15 @@ public @interface PluginDescriptor
     String Bee = "<html>[<font color=#FFD700><b>B</b></font>] ";
     String Nate = "<html>[<font color=orange>N</font>] ";
     String Mocrosoft = "<html>[<font color=#b8f704M>M</font>] ";
-    String OG = "<html>[<font color=#FF69B4>O</font>] ";
     String Default = "<html>[<font color=green>D</font>] ";
-    String SaCo = "<html>[<font color=#0d937b>S</font>] ";
     String Bank = "<html>[<font color=#9900ff>B</font>] ";
-    String Trent = "<html>[<font color=#00ff00>T</font>] ";
     String Forn = "<html>[<font color=#AF2B1E>F</font>] ";
+    String OG = "<html>[<font color=#FF69B4>O</font>] ";
+    String SaCo = "<html>[<font color=#0d937b>S</font>] ";
+    String Trent = "<html>[<font color=#00ff00>T</font>] ";
     String Lucid = "<html>[<font color=#32CD32>L</font>] ";
     String xKylee = "<html><font color=\"#32CD32\">K</font>";
+    String Devin = "<html>[<font color=#1E90FF>DD</font>] ";
     String See1Duck = "<html>[<font color=#ffff1a>\uD83E\uDD86</font>] ";
     String TaFCat = "<html>[<font color=#ffff1a>\uD83D\uDC31</font>] ";
     String GMason = "<html>[<font color=#0077B6>G</font>] ";
@@ -66,9 +67,9 @@ public @interface PluginDescriptor
 	String Maxxin = "<html>[<font color='#8B0000'>MX</font>] ";
 	String Hal = "<html>[<font color=#000000>Hal</font>] ";
 	String Funk = "<html>[<font color=#ffff1a>\uD83C\uDF19</font>] ";
-  	String Cardew = "<html>[<font color=#824BA3>CD</font>]";
+	String Cardew = "<html>[<font color=#824BA3>CD</font>]";
 	String Bolado = "<html>[<font color=#FF0000><b>\uD83D\uDE21</b></font>] ";
- 	String Choken = "<html>[<font color=#8A2BE2>\u03A9</font>] ";
+	String Choken = "<html>[<font color=#8A2BE2>\u03A9</font>] ";
 
 	String name();
 
@@ -110,7 +111,7 @@ public @interface PluginDescriptor
 	 * If this plugin should be disabled on startup. This is used for plugins that
 	 * are not needed in certain situations, like the cache debugger.
 	 */
-	boolean disableOnStartUp() default false; 
+	boolean disableOnStartUp() default false;
 	/**
 	 * disable the plugin on startup and not allow it to be enabled
 	 * This is used for plugins that are not needed in certain situations
@@ -122,6 +123,18 @@ public @interface PluginDescriptor
 	 * Whether or not plugin is hidden from configuration panel
 	 */
 	boolean hidden() default false;
+
+	/**
+	 * The internal-name of a Plugin Hub plugin as used in the PluginHub repository.
+	 * This value must be all lowercase and snake-cased
+	 */
+	String internalName() default "";
+
+	/**
+	 * The subpath of .runelite this plugin that should be migrated to the plugin's
+	 * {@link Plugin#getPluginDirectory() plugin directory}.
+	 */
+	String legacyDataDirectory() default "";
 
 	boolean developerPlugin() default false;
 

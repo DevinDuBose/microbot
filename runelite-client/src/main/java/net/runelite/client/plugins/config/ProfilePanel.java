@@ -71,7 +71,7 @@ import java.util.concurrent.ScheduledExecutorService;
 @Slf4j
 class ProfilePanel extends PluginPanel
 {
-    private static final int MAX_PROFILES = 20;
+    private static final int MAX_PROFILES = 64;
 
     private static final ImageIcon ADD_ICON = new ImageIcon(ImageUtil.loadImageResource(ScreenMarkerPlugin.class, "add_icon.png"));
     private static final ImageIcon DELETE_ICON = new ImageIcon(ImageUtil.loadImageResource(ProfilePanel.class, "mdi_delete.png"));
@@ -449,6 +449,11 @@ class ProfilePanel extends PluginPanel
                     if (defaultForRsProfiles == null || defaultForRsProfiles.isEmpty())
                     {
                         tooltip.append("Set profile as default for the current RuneScape account");
+                        final RuneScapeProfileType currentType = configManager.getConfiguration(ConfigManager.RSPROFILE_GROUP, configManager.getRSProfileKey(), ConfigManager.RSPROFILE_TYPE, RuneScapeProfileType.class);
+                        if (currentType != null && currentType != RuneScapeProfileType.STANDARD)
+                        {
+                            tooltip.append(" on ").append(Text.titleCase(currentType)).append(" worlds");
+                        }
                     }
                     else
                     {

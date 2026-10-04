@@ -69,6 +69,7 @@ public class ShortestPathPanel extends PluginPanel
 	private final ShortestPathConfig config;
 	private final ConfigManager configManager;
 
+	private final JButton walkingToggleButton = new JButton("Automatic walking: ON");
 	private JTextField xField, yField, zField;
 	private JComboBox<BankLocation> bankComboBox;
 	private JComboBox<DepositBoxLocation> depositBoxComboBox;
@@ -102,6 +103,16 @@ public class ShortestPathPanel extends PluginPanel
 		setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
 		setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
+        walkingToggleButton.addActionListener(e -> plugin.toggleManualWalking());
+        walkingToggleButton.setAlignmentX(Component.CENTER_ALIGNMENT);
+        add(walkingToggleButton);
+        add(createHotkeyRow("toggleWalkingHotkey", config.toggleWalkingHotkey(), "Toggle automatic walking; keep the route."));
+        JButton clearPathButton = new JButton("Clear current path");
+        clearPathButton.addActionListener(e -> stopWalking());
+        clearPathButton.setAlignmentX(Component.CENTER_ALIGNMENT);
+        add(clearPathButton);
+        add(createHotkeyRow("clearCurrentPathHotkey", config.clearCurrentPathHotkey(), "Clear the destination and route."));
+        add(Box.createRigidArea(new Dimension(0, 10)));
 		add(createCustomLocationPanel());
 		add(Box.createRigidArea(new Dimension(0, 10)));
 		add(createBankPanel());
@@ -118,6 +129,11 @@ public class ShortestPathPanel extends PluginPanel
 		add(Box.createRigidArea(new Dimension(0, 10)));
 		add(createHunterCreaturePanel());
 	}
+
+    void updateWalkingState(boolean enabled)
+    {
+        walkingToggleButton.setText("Automatic walking: " + (enabled ? "ON" : "OFF"));
+    }
 
 	private Border createCenteredTitledBorder(String title, String iconPath)
 	{
@@ -241,7 +257,7 @@ public class ShortestPathPanel extends PluginPanel
 		stopButton.addActionListener(e -> stopWalking());
 
 		//JPanel nearestBankPanel = new JPanel(new FlowLayout(FlowLayout.CENTER)); Old layout without Ge Button
-		JPanel nearestBankPanel = new JPanel(new GridLayout(2, 1, 5, 5));
+		JPanel nearestBankPanel = new JPanel(new GridLayout(3, 1, 5, 5));
 		JButton useNearestBankButton = new JButton("Go To Nearest Bank");
 
 		JButton goToGrandExchangeButton = new JButton("Go To Grand Exchange");
@@ -249,6 +265,16 @@ public class ShortestPathPanel extends PluginPanel
 			// Grand Exchange WorldPoint
 			WorldPoint ge = new WorldPoint(3164, 3487, 0); // Varrock GE location
 			startWalking(ge);
+		});
+
+		// Motherlode Mine is a dungeon: right-clicking it on the world map yields a "display"
+		// coordinate that getSelectedWorldPoint() rejects, so it can only be reached by targeting the
+		// real game tile directly. This button does exactly that (the transport in from the Dwarven
+		// Mine is added automatically by the pathfinder).
+		JButton goToMotherlodeMineButton = new JButton("Go To Motherlode Mine");
+		goToMotherlodeMineButton.addActionListener(e -> {
+			WorldPoint motherlodeMine = new WorldPoint(3728, 5692, 0); // lower-level entrance landing tile
+			startWalking(motherlodeMine);
 		});
 
 		useNearestBankButton.addActionListener(e -> startWalkingNearestBank());
@@ -260,6 +286,7 @@ public class ShortestPathPanel extends PluginPanel
 			"Hotkey: walk to the nearest bank from your current location."));
 		nearestBankPanel.add(nearestBankRow);
 		nearestBankPanel.add(goToGrandExchangeButton); // Go to GE button
+		nearestBankPanel.add(goToMotherlodeMineButton); // Go to Motherlode Mine (dungeon, bypasses world-map click)
 
 		buttonPanel.add(startButton);
 		buttonPanel.add(stopButton);

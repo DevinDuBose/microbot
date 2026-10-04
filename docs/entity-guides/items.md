@@ -136,7 +136,7 @@ Set JVM flag `-Dmicrobot.bank.validateInventorySetup=true` so `Rs2InventorySetup
 
 ## 8. Ground-item action reflection must fail closed to `Take`, not `CANCEL`
 
-`Rs2GroundItem` and `Rs2TileItemModel` recover ground-item actions from the injected client's `ItemComposition`. That backing layout is obfuscated and can shift on RuneLite bumps. If reflection cannot find a real action list, treat the ground item as exposing `Take` in the injected client's third ground-item slot instead of returning an empty action array.
+For non-pickup actions, `Rs2TileItemModel` recovers ground-item actions from the injected client's `ItemComposition`. Ordinary `Take` uses `GROUND_ITEM_THIRD_OPTION` directly and does not depend on reflection. That backing layout is obfuscated and can shift on RuneLite bumps. If reflection cannot find a real action list, treat the ground item as exposing `Take` in the injected client's third ground-item slot instead of returning an empty action array.
 
 **Why this matters:** After the RuneLite 1.12.30 bump, the reflection path returned `[]` for ordinary loot such as Cowhide. Loot helpers then failed to map `"Take"` to `GROUND_ITEM_THIRD_OPTION`, silently dispatched a no-op/cancel action, and ExampleScript's drop-and-loot smoke test failed even though the dropped item was visible and lootable.
 
@@ -152,3 +152,75 @@ Do not make call sites compensate by assuming `index == 0` when the action array
 **Where this applies:** `Rs2Reflection.getGroundItemActions`, `Rs2GroundItem.interact`, `Rs2TileItemModel.click`, and any future ground-item interaction helper that derives a `MenuAction` from item actions.
 
 **Defensive check:** Live smoke with ExampleScript's "Drop and loot item" check after any RuneLite or injected-client version bump.
+
+---
+
+## 9. Dispatch ground-item actions through the synthetic target menu
+
+Resolve the ground item's action and `MenuAction` first, then dispatch it with `Microbot.doInvoke(NewMenuEntry, bounds)`. Do not call `Rs2Reflection.invokeMenu` directly for ground-item interactions.
+
+**Why this matters:** A raw canvas click can select a door or NPC that visually overlaps the ground item's tile. The reflected client-menu call can loot successfully but still emit `Unable to find clicked menu op` engine messages because it bypasses the normal clicked-menu correlation. `Microbot.doInvoke` sets `Microbot.targetMenu` before clicking, allowing `MicrobotPlugin` to replace the generated scene menu with the intended ground-item entry regardless of what is under the cursor.
+
+**Pattern to follow:**
+
+```java
+Microbot.doInvoke(new NewMenuEntry()
+        .option(action)
+        .target(target)
+        .identifier(itemId)
+        .opcode(menuAction.getId())
+        .param0(sceneX)
+        .param1(sceneY)
+        .itemId(-1)
+        .worldViewId(worldViewId), bounds);
+```
+
+Keep action discovery and dispatch separate: `Rs2TileItemModel.click` owns the shared dispatcher, and legacy `Rs2GroundItem` resolves the current item through the tile-item cache before delegating. `Take` uses the third option directly; reflection is only needed for other actions. `Microbot.doInvoke` owns the interaction.
+
+**Where this applies:** `Rs2GroundItem.interact`, `Rs2TileItemModel.click`, and future ground-item interaction helpers.
+
+**Defensive check:** Drop loot on a tile visually overlapped by an NPC and beside an openable door. Verify the intended item is taken from multiple camera angles and no `Unable to find clicked menu op` engine message appears.
+
+## 10. Distinguish a restored bank snapshot from a live bank update
+
+Bank snapshots are saved per RuneScape profile and restored after a restart. The legacy walker's route planning can use `Rs2Bank.hasBankMirrorSnapshot()` to avoid an unnecessary cache-bootstrap bank trip, but restored data must not advance `getBankLiveEpoch()`. Opening the bank and changing its contents refresh the snapshot through `ItemContainerChanged(BANK)`; publish the complete item list before advancing the epoch.
+
+**Why this matters:** Requiring a live epoch for route planning ignores persisted data, while treating restored data as live can allow bank actions to trust an outdated snapshot.
+
+**Where this applies:** `Rs2Bank`, `Rs2BankData`, and the legacy `Rs2Walker` bank-cache bootstrap check.
+
+**Defensive check:** Restart with a saved snapshot and verify it is available with epoch zero, then open the bank and verify the epoch advances and the saved contents match the live container.
+
+## 11. Propagate ground-item dispatch failures
+
+Legacy wrappers must return the result of the shared tile-item dispatcher. A rejected action must return false. A true result from click, pickup, or a legacy interaction only means a click was dispatched; callers needing pickup confirmation must observe the inventory or relevant ground-stack change with a bounded condition wait. Never block the client thread to wait for pickup.
+
+**Why this matters:** A live drop-and-pickup probe showed that an unsupported action returned true through the legacy RS2Item wrapper even though the dispatcher rejected it.
+
+**Where this applies:** Rs2GroundItem interaction wrappers, Rs2TileItemModel, and ground-item API callers.
+
+## 12. Preserve an explicit ground-item Take when a widget is selected
+
+An explicit `Take` must remain `GROUND_ITEM_THIRD_OPTION`, even when an inventory item or spell is selected. Only generic/custom interactions may resolve to `WIDGET_TARGET_ON_GROUND_ITEM`.
+
+**Why this matters:** A live probe selected an inventory item before calling `pickup()`. The old dispatcher returned true but used the selected item on the ground stack instead of collecting it; inventory never recovered the dropped item.
+
+**Defensive check:** Drop one item, select another inventory item with `Use`, call `pickup()`, and verify the inventory count is restored.
+
+## 13. Verify stackable withdrawals by quantity, not inventory slot count
+
+`Rs2Inventory.count(id)` counts matching inventory slots. A stack of three air runes counts as one slot; use `Rs2Inventory.itemQuantity(id)` when comparing the amount before and after `Rs2Bank.withdrawX(id, amount)`.
+
+**Why this matters:** The walker waited for three new matching slots after withdrawing three air runes for Falador Teleport. The runes occupy one stack, so the wait timed out and the walker incorrectly abandoned the banking route even if the withdrawal succeeded.
+
+**Pattern to follow:**
+
+```java
+int before = Rs2Inventory.itemQuantity(itemId);
+if (!Rs2Bank.withdrawX(itemId, amount)
+        || !sleepUntil(() -> Rs2Inventory.itemQuantity(itemId) >= before + amount, 3000)) {
+    return false;
+}
+```
+
+**Where this applies:** `Rs2Walker.walkWithBankingState` and any bank or inventory workflow that verifies a quantity of stackable items.
