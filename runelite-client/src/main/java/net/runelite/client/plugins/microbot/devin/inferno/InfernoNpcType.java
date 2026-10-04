@@ -56,13 +56,13 @@ public enum InfernoNpcType {
                     AnimationID.JALAK_ATTACK_RANGED, Style.UNKNOWN)),
 
     BLOB_SPLIT_MAGE(ids(NpcID.INFERNO_CREATURE_SPLITTER_MAGE), Style.MAGIC, 4, Range.LONG, 45, 55, true,
-            anims()),
+            splitAnims(Style.MAGIC)),
 
     BLOB_SPLIT_RANGE(ids(NpcID.INFERNO_CREATURE_SPLITTER_RANGE), Style.RANGE, 4, Range.LONG, 45, 55, true,
-            anims()),
+            splitAnims(Style.RANGE)),
 
     BLOB_SPLIT_MELEE(ids(NpcID.INFERNO_CREATURE_SPLITTER_MELEE), Style.MELEE, 4, Range.MELEE, 45, 55, true,
-            anims()),
+            splitAnims(Style.MELEE)),
 
     MELEER(ids(NpcID.INFERNO_CREATURE_MELEE), Style.MELEE, 4, Range.MELEE, 30, 70, true,
             anims(AnimationID.JALIMKOT_ATTACK, Style.MELEE)),
@@ -178,6 +178,15 @@ public enum InfernoNpcType {
 
     private static Set<Integer> ids(Integer... ids) {
         return Set.of(ids);
+    }
+
+    /**
+     * Blob splits share the blob's skeleton (game cache: both idle on animation 7586), so their
+     * attacks can only be the blob's attack animations. A split's style is fixed by its type.
+     */
+    private static Map<Integer, Style> splitAnims(Style style) {
+        return anims(AnimationID.JALAK_ATTACK_MAGIC, style, AnimationID.JALAK_ATTACK_MELEE, style,
+                AnimationID.JALAK_ATTACK_RANGED, style);
     }
 
     private static Map<Integer, Style> anims(Object... pairs) {

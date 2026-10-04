@@ -67,6 +67,10 @@ public class InfernoNpcTypeTest {
         // 7581/7583 have contradictory style names across sources: attack only, style unknown.
         assertEquals(Map.of(7582, MELEE, 7581, UNKNOWN, 7583, UNKNOWN), InfernoNpcType.BLOB.getAttackAnimations());
         assertEquals(Map.of(7597, MELEE), InfernoNpcType.MELEER.getAttackAnimations());
+        // Splits use the blob's skeleton (cache: idle animation 7586), so blob attack animations.
+        assertEquals(Map.of(7581, MAGIC, 7582, MAGIC, 7583, MAGIC), InfernoNpcType.BLOB_SPLIT_MAGE.getAttackAnimations());
+        assertEquals(Map.of(7581, RANGE, 7582, RANGE, 7583, RANGE), InfernoNpcType.BLOB_SPLIT_RANGE.getAttackAnimations());
+        assertEquals(Map.of(7581, MELEE, 7582, MELEE, 7583, MELEE), InfernoNpcType.BLOB_SPLIT_MELEE.getAttackAnimations());
         assertEquals(Map.of(7605, RANGE, 7604, MELEE), InfernoNpcType.RANGER.getAttackAnimations());
         assertEquals(Map.of(7610, MAGIC, 7612, MELEE), InfernoNpcType.MAGER.getAttackAnimations());
         assertEquals(Map.of(7592, MAGIC, 7593, RANGE, 7590, MELEE), InfernoNpcType.JAD.getAttackAnimations());
