@@ -230,12 +230,16 @@ public final class InfernoBrain {
         dodgeStreak = 0;
         expectedKills.clear();
         pendingCastTarget = -1;
+        safeTarget = null;
     }
 
     public List<String> decide(InfernoObservation o) {
         List<String> actions = new ArrayList<>();
         recordProtection(o);
         updateTrackers(o);
+        if (DIAG_PRED == 1) {
+            checkPredictions(o);
+        }
 
         InfernoGrid grid = buildGrid(o);
         WorldPoint me = new WorldPoint(o.x, o.y, 0);
@@ -754,12 +758,14 @@ public final class InfernoBrain {
 
     /** A monster during a look-ahead: where it stands and when it can next attack. */
     private static final class Sim {
+        final int index;
         final InfernoNpcType type;
         WorldArea area;
         int next;
         final int[] own;
 
-        Sim(InfernoNpcType type, WorldArea area, int next) {
+        Sim(int index, InfernoNpcType type, WorldArea area, int next) {
+            this.index = index;
             this.type = type;
             this.area = area;
             this.next = next;
@@ -803,7 +809,7 @@ public final class InfernoBrain {
                 continue;
             }
             int next = unknown ? o.tick + 1 : Math.max(tr.nextAttackTick, o.tick + 1);
-            sims.add(new Sim(type, area(n), next));
+            sims.add(new Sim(n.index, type, area(n), next));
         }
         if (sims.isEmpty()) {
             return 0;
@@ -822,6 +828,9 @@ public final class InfernoBrain {
                 if (InfernoThreatModel.canAttack(grid, m.type, m.area, t)) {
                     if (tick >= m.next) {
                         m.next = tick + attackSpeed(m.type, o.wave);
+                        if (rolloutEvents != null) {
+                            rolloutEvents.add(new int[]{m.index, tick});
+                        }
                         double hit = EXPECTED_HIT_FRACTION * MaxHits.of(m.type, false);
                         if (!m.type.isMeleeOnly() && m.area.isInMeleeDistance(t)) {
                             double melee = EXPECTED_HIT_FRACTION * MaxHits.of(m.type, true);
@@ -871,6 +880,16 @@ public final class InfernoBrain {
     private WorldPoint safespot(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me, WorldPoint chosen) {
         int[][] tree = pathTree(grid, me);
         double chosenDmg = rolloutDamage(o, grid, occ, me, approachPlan(tree, me, chosen), false);
+        // Keep heading for a safespot we already picked while it stays clearly better than the
+        // default tile: re-picking every tick flip-flops between equally good tiles and we
+        // never arrive (seen: 400 ticks without attacking while bats hit us).
+        if (safeTarget != null && o.tick <= safeUntil && !me.equals(safeTarget) && grid.isStandable(safeTarget)) {
+            WorldPoint[] plan = approachPlan(tree, me, safeTarget);
+            if (plan != null && rolloutDamage(o, grid, occ, me, plan, false) <= chosenDmg - SAFESPOT_MARGIN / 2) {
+                return safeTarget;
+            }
+        }
+        safeTarget = null;
         if (chosenDmg < SAFESPOT_MARGIN) {
             return null;
         }
@@ -896,8 +915,17 @@ public final class InfernoBrain {
                 }
             }
         }
+        if (best != null && !best.equals(me)) {
+            safeTarget = best;
+            safeUntil = o.tick + SAFESPOT_COMMIT;
+        }
         return best;
     }
+
+    /** Ticks we keep walking to a picked safespot before re-choosing. */
+    static final int SAFESPOT_COMMIT = tunableInt("SAFESPOT_COMMIT", 8);
+    private WorldPoint safeTarget;
+    private int safeUntil;
 
     /**
      * Our tiles over {@link #SAFESPOT_HORIZON} ticks running (two steps a tick) along the
@@ -967,6 +995,96 @@ public final class InfernoBrain {
             cy = pv % n;
         }
         return path;
+    }
+
+    /**
+     * Diagnostics: the look-ahead's predicted attacks (if we stand still) checked against the
+     * attacks that then happen, on ticks we really did stand still. Printed to stderr.
+     */
+    static final int DIAG_PRED = tunableInt("DIAG_PRED", 0);
+    private List<int[]> rolloutEvents;
+    /** [madeTick, x, y] -> predicted (npc index, attack tick) pairs. */
+    private final java.util.ArrayDeque<Object[]> predictions = new java.util.ArrayDeque<>();
+    private final Map<String, int[]> predStats = new java.util.TreeMap<>();
+    private int lastX = Integer.MIN_VALUE;
+    private int lastY;
+    private int stillSince;
+
+    private void checkPredictions(InfernoObservation o) {
+        if (o.x != lastX || o.y != lastY) {
+            stillSince = o.tick;
+            lastX = o.x;
+            lastY = o.y;
+        }
+        Map<Integer, InfernoNpcType> alive = new HashMap<>();
+        Set<Integer> attacked = new HashSet<>();
+        for (Npc n : o.npcs) {
+            InfernoNpcType type = InfernoNpcType.forNpcId(n.id);
+            if (type == null) {
+                continue;
+            }
+            alive.put(n.index, type);
+            if (n.animation >= 0 && type.getAttackAnimations().containsKey(n.animation)) {
+                attacked.add(n.index);
+            }
+        }
+        for (Object[] rec : predictions) {
+            int made = (int) rec[0];
+            if (made < stillSince || made >= o.tick || o.tick > made + 6) {
+                continue; // we moved since, or out of the window
+            }
+            @SuppressWarnings("unchecked")
+            Set<Integer> predictedNow = new HashSet<>();
+            @SuppressWarnings("unchecked")
+            Set<Integer> known = (Set<Integer>) rec[2];
+            for (int[] e : (List<int[]>) rec[1]) {
+                if (e[1] == o.tick) {
+                    predictedNow.add(e[0]);
+                }
+            }
+            for (Integer idx : known) {
+                InfernoNpcType type = alive.get(idx);
+                if (type == null || !type.isThreat() || type.getProtectPriority() == 0) {
+                    continue;
+                }
+                boolean p = predictedNow.contains(idx);
+                boolean a = attacked.contains(idx);
+                int[] st = predStats.computeIfAbsent(type.name(), k -> new int[3]);
+                if (p && a) {
+                    st[0]++;
+                } else if (p) {
+                    st[1]++;
+                } else if (a) {
+                    st[2]++;
+                }
+            }
+        }
+        while (!predictions.isEmpty() && (int) predictions.peekFirst()[0] < o.tick - 6) {
+            predictions.pollFirst();
+        }
+        if (!o.npcs.isEmpty()) {
+            boolean[][] occ = occupied(buildGrid(o), o);
+            WorldPoint me = new WorldPoint(o.x, o.y, 0);
+            WorldPoint[] plan = new WorldPoint[6];
+            java.util.Arrays.fill(plan, me);
+            rolloutEvents = new ArrayList<>();
+            rolloutDamage(o, buildGrid(o), occ, me, plan, false);
+            Set<Integer> known = new HashSet<>();
+            for (Npc n : o.npcs) {
+                known.add(n.index);
+            }
+            predictions.addLast(new Object[]{o.tick, rolloutEvents, known});
+            rolloutEvents = null;
+        }
+        if (o.tick % 500 == 0) {
+            StringBuilder sb = new StringBuilder("PREDSTATS t" + o.tick);
+            for (Map.Entry<String, int[]> e : predStats.entrySet()) {
+                int[] v = e.getValue();
+                sb.append(" ").append(e.getKey()).append(" hit=").append(v[0]).append(" falseAlarm=").append(v[1])
+                        .append(" missed=").append(v[2]);
+            }
+            System.err.println(sb);
+        }
     }
 
     /** Diagnostics: print, each tick, expected damage at the chosen tile vs the best nearby tile. */
