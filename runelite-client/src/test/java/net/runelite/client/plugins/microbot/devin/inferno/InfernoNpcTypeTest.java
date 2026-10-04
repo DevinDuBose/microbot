@@ -104,7 +104,7 @@ public class InfernoNpcTypeTest {
         assertTrue(InfernoNpcType.NIBBLER.isMeleeOnly());
         assertTrue(InfernoNpcType.JAD_HEALER.isMeleeOnly());
         // Unverified exact ranges are treated as unlimited (never under-report a threat).
-        for (InfernoNpcType t : new InfernoNpcType[]{InfernoNpcType.BLOB, InfernoNpcType.RANGER,
+        for (InfernoNpcType t : new InfernoNpcType[]{InfernoNpcType.RANGER,
                 InfernoNpcType.MAGER, InfernoNpcType.JAD, InfernoNpcType.BLOB_SPLIT_MAGE, InfernoNpcType.BLOB_SPLIT_RANGE}) {
             assertTrue(t + " range", t.getRange() >= 30);
         }
@@ -195,5 +195,15 @@ public class InfernoNpcTypeTest {
         assertEquals(6, blob.ticksUntilAttack(0));
         blob.onStyleProjectile(MAGIC);
         assertEquals(MAGIC, blob.getLastStyle());
+    }
+
+    /** Attack ranges from xKylee's InfernoNPC.Type (live-observed): bat 4, blob 15, ranger/mager 98. */
+    @Test
+    public void attackRanges() {
+        assertEquals(4, InfernoNpcType.BAT.getRange());
+        assertEquals(15, InfernoNpcType.BLOB.getRange());
+        assertTrue(InfernoNpcType.RANGER.getRange() >= 98);
+        assertTrue(InfernoNpcType.MAGER.getRange() >= 98);
+        assertEquals(1, InfernoNpcType.MELEER.getRange());
     }
 }

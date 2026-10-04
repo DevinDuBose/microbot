@@ -469,7 +469,7 @@ public final class InfernoBrain {
         return new WorldArea(n.x, n.y, n.size, n.size, 0);
     }
 
-    private boolean[][] occupied(InfernoGrid grid, InfernoObservation o) {
+    static boolean[][] occupied(InfernoGrid grid, InfernoObservation o) {
         boolean[][] occ = new boolean[GRID_SIZE][GRID_SIZE];
         for (Npc n : o.npcs) {
             for (int dx = 0; dx < n.size; dx++) {

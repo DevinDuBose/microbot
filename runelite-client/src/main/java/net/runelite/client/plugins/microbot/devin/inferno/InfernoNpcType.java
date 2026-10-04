@@ -50,7 +50,7 @@ public enum InfernoNpcType {
     BAT(ids(NpcID.INFERNO_CREATURE_HARPIE), Style.RANGE, 3, 4, 70, 50, true,
             anims(AnimationID.JALMEJRAH_ATTACK, Style.RANGE)),
 
-    BLOB(ids(NpcID.INFERNO_CREATURE_SPLITTER), Style.UNKNOWN, 6, Range.LONG, 40, 60, true,
+    BLOB(ids(NpcID.INFERNO_CREATURE_SPLITTER), Style.UNKNOWN, 6, Range.BLOB, 40, 60, true,
             anims(AnimationID.JALAK_ATTACK_MELEE, Style.MELEE,
                     AnimationID.JALAK_ATTACK_MAGIC, Style.UNKNOWN,
                     AnimationID.JALAK_ATTACK_RANGED, Style.UNKNOWN)),
@@ -146,8 +146,13 @@ public enum InfernoNpcType {
     /** Range sentinels. */
     public static final class Range {
         public static final int MELEE = 1;
-        /** Unlimited for any arena distance. */
+        /** Unlimited for any arena distance (xKylee InfernoNPC: ranger/mager 98, Jad 99). */
         public static final int LONG = 99;
+        /**
+         * Jal-Ak: 15 tiles (xKylee InfernoNPC.Type BLOB range 15; the InfernoTrainer simulator
+         * agrees). Splits stay unlimited: no live source found for their range.
+         */
+        public static final int BLOB = 15;
 
         private Range() {
         }
