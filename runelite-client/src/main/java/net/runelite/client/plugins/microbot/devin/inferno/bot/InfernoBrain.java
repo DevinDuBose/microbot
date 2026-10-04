@@ -2121,7 +2121,10 @@ public final class InfernoBrain {
      * "mager &gt; ranger &gt; meleer &gt; blob &gt; bat". Nibblers lead while pillars stand, except
      * from wave 50: "do not risk your life over it in the higher waves (50+)".
      */
-    static final int KILL_ORDER_WIKI = tunableInt("KILL_ORDER_WIKI", 1);
+    // Off pending the user's reading of the wiki: with several attackers this kills an
+    // attacking mager before an attacking bat; sim (12 runs, waves 1-66): 45.2 avg waves vs
+    // 50.6, bat damage doubled.
+    static final int KILL_ORDER_WIKI = tunableInt("KILL_ORDER_WIKI", 0);
 
     private int wikiKillPriority(Npc n, InfernoNpcType type, boolean pillarsUp) {
         if (type == InfernoNpcType.NIBBLER) {
