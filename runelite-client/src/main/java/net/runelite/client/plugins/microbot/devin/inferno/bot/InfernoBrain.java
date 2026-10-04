@@ -641,6 +641,17 @@ public final class InfernoBrain {
         return false;
     }
 
+    /**
+     * Whether a ranger, mager or blob beside {@code t} can melee it. OSRS Wiki
+     * (Inferno/Strategies): "magers can melee diagonally across"; rangers "sometimes use melee if
+     * the player is standing next to them, even diagonally"; "Blobs can also attack with melee if
+     * you stand too close, even diagonally". (Meleers "cannot attack diagonally": cardinal only,
+     * see InfernoThreatModel.canAttack.)
+     */
+    static boolean rangedMeleeReach(WorldArea a, WorldPoint t) {
+        return a.distanceTo(t) == 1;
+    }
+
     /** One monster that can attack a candidate tile. */
     private static final class Threat {
         final Style style;
@@ -685,7 +696,7 @@ public final class InfernoBrain {
                 meleerAdjacent = true;
             }
             double dps = EXPECTED_HIT_FRACTION * MaxHits.of(type, false) / type.getAttackSpeed();
-            if (!type.isMeleeOnly() && a.isInMeleeDistance(t)) {
+            if (!type.isMeleeOnly() && rangedMeleeReach(a, t)) {
                 // Adjacent rangers, magers and blobs choose melee or their main style at random:
                 // half of their damage cannot be prayed against.
                 double meleeDps = EXPECTED_HIT_FRACTION * MaxHits.of(type, true) / type.getAttackSpeed();
@@ -832,7 +843,7 @@ public final class InfernoBrain {
                             rolloutEvents.add(new int[]{m.index, tick});
                         }
                         double hit = EXPECTED_HIT_FRACTION * MaxHits.of(m.type, false);
-                        if (!m.type.isMeleeOnly() && m.area.isInMeleeDistance(t)) {
+                        if (!m.type.isMeleeOnly() && rangedMeleeReach(m.area, t)) {
                             double melee = EXPECTED_HIT_FRACTION * MaxHits.of(m.type, true);
                             unprotectable += 0.5 * Math.min(hit, melee);
                             hit = 0.5 * Math.max(hit, melee);
@@ -1625,7 +1636,7 @@ public final class InfernoBrain {
             // Jad's projectiles are not identified yet: keep timing him from his animation.
             return true;
         }
-        return area(n).isInMeleeDistance(stand) && (t.type == InfernoNpcType.RANGER
+        return rangedMeleeReach(area(n), stand) && (t.type == InfernoNpcType.RANGER
                 || t.type == InfernoNpcType.MAGER || t.type == InfernoNpcType.BLOB || t.type == InfernoNpcType.JAD);
     }
 
@@ -1654,7 +1665,7 @@ public final class InfernoBrain {
             // Beside us it melees only by chance (OSRS Wiki: "a random chance ... instead of a
             // ranged/magic attack"), and only while we are not praying Melee; praying Melee
             // instead makes its scanned style a certain hit. So the scanned style is covered.
-            if (BLOB_ADJACENT_MELEE == 1 && area(n).isInMeleeDistance(stand) && read != Prayer.PROTECT_MELEE) {
+            if (BLOB_ADJACENT_MELEE == 1 && rangedMeleeReach(area(n), stand) && read != Prayer.PROTECT_MELEE) {
                 style = Style.MELEE;
             } else if (read == Prayer.PROTECT_MAGIC) {
                 style = Style.RANGE;
