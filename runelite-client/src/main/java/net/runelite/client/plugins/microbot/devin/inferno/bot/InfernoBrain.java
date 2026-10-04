@@ -54,6 +54,10 @@ public final class InfernoBrain {
     static final int SEARCH_RADIUS = 7;
     /** A new tile must beat the current one by this much (HP per tick) to be worth moving. */
     static final double MOVE_HYSTERESIS = 0.5;
+    /** Ticks to stay committed to a chosen tile (stops tile-to-tile oscillation). */
+    static final int COMMIT_TICKS = 4;
+    /** During a commitment, another tile must beat ours by this much to switch. */
+    static final double COMMIT_MARGIN = 2.0;
     /** Cost of each tile walked, in HP-per-tick units. */
     static final double MOVE_COST = 0.15;
     /** Value of being able to hit the kill target this tick (roughly our damage output). */
@@ -94,6 +98,10 @@ public final class InfernoBrain {
     private int brewSipsSinceRestore;
     private int lastUseTick = -10;
     private int idleTicks;
+    /** NPC indices able to attack the player this tick. */
+    private final Set<Integer> attackingNow = new HashSet<>();
+    private WorldPoint committedTile;
+    private int committedUntil = -1;
 
     public void reset() {
         trackers.clear();
@@ -101,6 +109,8 @@ public final class InfernoBrain {
         brewSipsSinceRestore = 0;
         lastUseTick = -10;
         idleTicks = 0;
+        committedTile = null;
+        committedUntil = -1;
     }
 
     public List<String> decide(InfernoObservation o) {
@@ -111,6 +121,13 @@ public final class InfernoBrain {
         InfernoGrid grid = buildGrid(o);
         WorldPoint me = new WorldPoint(o.x, o.y, 0);
         idleTicks = anyHittable(grid, o, me) ? 0 : idleTicks + 1;
+        attackingNow.clear();
+        for (Npc n : o.npcs) {
+            InfernoNpcType type = InfernoNpcType.forNpcId(n.id);
+            if (type != null && type.isThreat() && InfernoThreatModel.canAttack(grid, type, area(n), me)) {
+                attackingNow.add(n.index);
+            }
+        }
 
         if (o.npcs.isEmpty()) {
             // Between waves: wait where the fewest spawn spots can see us.
@@ -267,7 +284,19 @@ public final class InfernoBrain {
                 }
             }
         }
-        return bestScore + MOVE_HYSTERESIS < currentScore ? best : me;
+        if (committedTile != null && o.tick <= committedUntil && grid.isStandable(committedTile)) {
+            double committedScore = committedTile.equals(me) ? currentScore
+                    : tileScore(o, grid, occ, me, committedTile, focus);
+            if (bestScore + COMMIT_MARGIN >= committedScore) {
+                return committedTile;
+            }
+        }
+        WorldPoint chosen = bestScore + MOVE_HYSTERESIS < currentScore ? best : me;
+        if (!chosen.equals(me)) {
+            committedTile = chosen;
+            committedUntil = o.tick + COMMIT_TICKS;
+        }
+        return chosen;
     }
 
     /** One monster that can attack a candidate tile. */
@@ -470,8 +499,7 @@ public final class InfernoBrain {
             if (t == null || !t.type.isThreat() || t.type.getProtectPriority() == 0) {
                 continue;
             }
-            if (!InfernoThreatModel.canAttack(grid, t.type, area(n), stand)
-                    && !InfernoThreatModel.canReachToAttack(grid, t.type, area(n), stand, occ)) {
+            if (!canAttackNextTick(grid, t.type, area(n), stand, occ)) {
                 continue;
             }
             int attackTick = t.nextAttackTick < 0 ? nextTick : Math.max(t.nextAttackTick, nextTick);
@@ -501,6 +529,23 @@ public final class InfernoBrain {
         if (!o.isPrayerActive(Prayer.EAGLE_EYE) && !o.isPrayerActive(Prayer.RIGOUR) && o.prayer > 0) {
             actions.add("PRAY " + Prayer.EAGLE_EYE + " 1");
         }
+    }
+
+    /**
+     * Whether a monster could attack {@code target} on the next tick: from where it stands, or
+     * after its one movement step (monsters can step and attack in the same tick).
+     */
+    static boolean canAttackNextTick(InfernoGrid grid, InfernoNpcType type, WorldArea a, WorldPoint target, boolean[][] occ) {
+        if (InfernoThreatModel.canAttack(grid, type, a, target)) {
+            return true;
+        }
+        int ownX1 = a.getX() - GRID_BASE_X;
+        int ownY1 = a.getY() - GRID_BASE_Y;
+        int ownX2 = ownX1 + a.getWidth() - 1;
+        int ownY2 = ownY1 + a.getHeight() - 1;
+        InfernoGrid.TileFilter free = (x, y) -> (x >= ownX1 && x <= ownX2 && y >= ownY1 && y <= ownY2) || !occ[x][y];
+        WorldArea next = InfernoThreatModel.nextStep(grid, a, new WorldArea(target, 1, 1), true, free);
+        return next == null || (next != a && InfernoThreatModel.canAttack(grid, type, next, target));
     }
 
     private Prayer protectionFor(Tracker t, Npc n, WorldPoint stand, int attackTick) {
@@ -553,7 +598,7 @@ public final class InfernoBrain {
             if (grid != null && !canHit(grid, o, from, n)) {
                 continue;
             }
-            int key = InfernoThreatModelAccess.killPriority(type, pillarsUp) * 1000
+            int key = killPriority(n, type, pillarsUp) * 1000
                     + (from == null ? 0 : area(n).distanceTo(from));
             if (key < bestKey) {
                 bestKey = key;
@@ -616,6 +661,18 @@ public final class InfernoBrain {
             }
         }
         return best;
+    }
+
+    /** Fragile monsters (two shots or fewer) that are hitting us right now jump the queue. */
+    static final int FRAGILE_ATTACKER_PRIORITY = 5;
+
+    private int killPriority(Npc n, InfernoNpcType type, boolean pillarsUp) {
+        boolean fragile = type == InfernoNpcType.BAT || type == InfernoNpcType.BLOB_SPLIT_MAGE
+                || type == InfernoNpcType.BLOB_SPLIT_RANGE || type == InfernoNpcType.BLOB_SPLIT_MELEE;
+        if (fragile && attackingNow.contains(n.index)) {
+            return FRAGILE_ATTACKER_PRIORITY;
+        }
+        return InfernoThreatModelAccess.killPriority(type, pillarsUp);
     }
 
     /** Small adapter so the brain can reuse the helper's kill priorities. */

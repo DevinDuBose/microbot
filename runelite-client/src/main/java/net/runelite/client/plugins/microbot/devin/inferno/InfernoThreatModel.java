@@ -126,7 +126,7 @@ public final class InfernoThreatModel {
      * @return the next area, the same area when stuck, or null when the
      * outcome is unpredictable (overlapping the target, leaving the scene)
      */
-    static WorldArea nextStep(InfernoGrid grid, WorldArea from, WorldArea target, boolean stopAtMeleeDistance,
+    public static WorldArea nextStep(InfernoGrid grid, WorldArea from, WorldArea target, boolean stopAtMeleeDistance,
                               InfernoGrid.TileFilter free) {
         if (from.getPlane() != target.getPlane()) {
             return null;
