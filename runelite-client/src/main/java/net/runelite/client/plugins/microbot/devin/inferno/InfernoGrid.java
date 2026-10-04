@@ -122,6 +122,29 @@ public final class InfernoGrid {
     }
 
     /**
+     * Line of sight from {@code from} to the single tile of {@code area} closest to it. Used
+     * for the player's own attacks: the InfernoTrainer simulator (and the Woox-derived
+     * community LOS tools) check the player's shot this way, which is stricter than
+     * {@link #hasLineOfSight}. If the game is more lenient we only skip a few shots; we never
+     * expect a shot the game refuses (which makes the player walk out of position).
+     */
+    public boolean hasLineOfSightToClosestTile(WorldPoint from, WorldArea area) {
+        if (from.getPlane() != area.getPlane() || from.getPlane() != plane) {
+            return false;
+        }
+        int cx = Math.max(area.getX(), Math.min(from.getX(), area.getX() + area.getWidth() - 1));
+        int cy = Math.max(area.getY(), Math.min(from.getY(), area.getY() + area.getHeight() - 1));
+        int fx = from.getX() - baseX;
+        int fy = from.getY() - baseY;
+        int tx = cx - baseX;
+        int ty = cy - baseY;
+        if (!inScene(fx, fy) || !inScene(tx, ty)) {
+            return false;
+        }
+        return tileLineOfSight(fx, fy, tx, ty);
+    }
+
+    /**
      * Port of the private {@code WorldArea.isVisibleCandidate} with "this" =
      * the 1x1 target tile (tx, ty) and "other" = the area (ax..ax2, ay..ay2).
      */

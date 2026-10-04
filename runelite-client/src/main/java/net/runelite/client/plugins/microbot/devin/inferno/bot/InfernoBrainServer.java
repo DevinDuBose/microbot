@@ -21,6 +21,8 @@ import java.util.List;
  *     NPC index id x y size hpPercent animation
  *     PROJ spotanimId sourceIndex ticksToImpact
  *     END                                            -> brain replies
+ *     STANDBY                                        -> MOVE x y END: where to wait for a wave
+ *                                                       (uses the preceding PILLAR lines)
  * out PRAY name 0|1 | MOVE x y | ATTACK index | USE slot ... then END
  * </pre>
  */
@@ -80,6 +82,14 @@ public final class InfernoBrainServer {
                 case "PROJ":
                     o.projectiles.add(new InfernoObservation.Projectile(i(f[1]), i(f[2]), i(f[3])));
                     break;
+                case "STANDBY": {
+                    // Pillars from the preceding PILLAR lines; reply with the standby tile.
+                    net.runelite.api.coords.WorldPoint t = InfernoBrain.standbyTile(o);
+                    out.write("MOVE " + t.getX() + " " + t.getY() + "\nEND\n");
+                    out.flush();
+                    o = new InfernoObservation();
+                    break;
+                }
                 case "END":
                     List<String> actions = brain.decide(o);
                     for (String a : actions) {

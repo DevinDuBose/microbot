@@ -91,6 +91,42 @@ public class InfernoGridTest {
     }
 
     @Test
+    public void closestTileLineOfSightIsStricterThanAreaLineOfSight() {
+        // Pillar row y 19..21 at x 28..30 (scene); mager 4x4 at x 24..27, y 16..19; player at (32, 19).
+        // The closest mager tile (27, 19) is straight behind the pillar, but the mager's
+        // north-east tiles are visible: area LOS succeeds, closest-tile LOS does not.
+        FakeScene s = new FakeScene().solid(28, 19, 30, 21);
+        InfernoGrid grid = s.grid();
+        WorldArea mager = new WorldArea(FakeScene.p(24, 16), 4, 4);
+        WorldPoint player = FakeScene.p(32, 19);
+        assertTrue(grid.hasLineOfSight(player, mager));
+        assertEquals(false, grid.hasLineOfSightToClosestTile(player, mager));
+        // In the open both agree.
+        InfernoGrid open = new FakeScene().grid();
+        assertTrue(open.hasLineOfSightToClosestTile(player, mager));
+    }
+
+    @Test
+    public void closestTileLineOfSightNeverExceedsAreaLineOfSight() {
+        Random rnd = new Random(0xC105E);
+        for (int arena = 0; arena < 20; arena++) {
+            InfernoGrid grid = randomArena(rnd, 0.05 + rnd.nextDouble() * 0.2).grid();
+            for (int i = 0; i < 400; i++) {
+                int size = 1 + rnd.nextInt(5);
+                WorldArea area = new WorldArea(FakeScene.p(coord(rnd, 8), coord(rnd, 8)), size, size);
+                WorldPoint target = area.toWorldPoint().dx(rnd.nextInt(21) - 10).dy(rnd.nextInt(21) - 10);
+                if (area.contains(target) || !grid.inScene(grid.sceneX(target), grid.sceneY(target))) {
+                    continue;
+                }
+                if (grid.hasLineOfSightToClosestTile(target, area)) {
+                    assertTrue("closest tile visible but area not: " + target + " " + area.toWorldPoint(),
+                            grid.hasLineOfSight(target, area));
+                }
+            }
+        }
+    }
+
+    @Test
     public void canTravelInDirectionMatchesRuneLite() {
         Random rnd = new Random(0x5EED);
         int checked = 0;

@@ -40,6 +40,17 @@ public final class InfernoBrain {
     static final int GRID_SIZE = 64;
     static final int PILLAR_SIZE = 3;
 
+    /**
+     * South-west tiles of the 9 monster spawn spots (world). From the InfernoTrainer simulator
+     * and community tools (inferno-los); consistent with the cache-verified arena mapping.
+     */
+    static final int[][] SPAWN_SPOTS = {
+        {2258, 5353}, {2279, 5353}, {2260, 5347}, {2280, 5346}, {2273, 5341},
+        {2262, 5335}, {2280, 5333}, {2258, 5330}, {2272, 5330},
+    };
+    /** Size assumed for a spawn spot's monster when choosing the standby tile (largest: mager). */
+    static final int SPAWN_SIZE = 4;
+
     static final int SEARCH_RADIUS = 7;
     /** A new tile must beat the current one by this much (HP per tick) to be worth moving. */
     static final double MOVE_HYSTERESIS = 0.5;
@@ -58,6 +69,8 @@ public final class InfernoBrain {
     static final int BLOB_SCAN_LEAD = 3;
 
     static final int EAT_BELOW_HP = 55;
+    /** Below this, healing beats restoring stats even when a restore is due. */
+    static final int CRITICAL_HP = 30;
     static final int RESTORE_BELOW_PRAYER = 25;
     static final int BREW_SIPS_PER_RESTORE = 3;
 
@@ -98,6 +111,16 @@ public final class InfernoBrain {
         InfernoGrid grid = buildGrid(o);
         WorldPoint me = new WorldPoint(o.x, o.y, 0);
         idleTicks = anyHittable(grid, o, me) ? 0 : idleTicks + 1;
+
+        if (o.npcs.isEmpty()) {
+            // Between waves: wait where the fewest spawn spots can see us.
+            WorldPoint standby = standbyTile(grid);
+            if (!standby.equals(me)) {
+                actions.add("MOVE " + standby.getX() + " " + standby.getY());
+            }
+            useSupplies(o, actions);
+            return actions;
+        }
 
         // Positioning first: prayer and target are evaluated for where we will stand.
         WorldPoint stand = choosePosition(o, grid, me);
@@ -211,10 +234,14 @@ public final class InfernoBrain {
         return occ;
     }
 
-    /** Whether the player on {@code from} can attack the NPC without walking. */
+    /**
+     * Whether the player on {@code from} can attack the NPC without walking. Uses the strict
+     * closest-tile line of sight (see {@link InfernoGrid#hasLineOfSightToClosestTile}); a
+     * lenient check here made the player walk out of position whenever the game disagreed.
+     */
     static boolean canHit(InfernoGrid grid, InfernoObservation o, WorldPoint from, Npc n) {
         WorldArea a = area(n);
-        return a.distanceTo(from) <= o.weaponRange && grid.hasLineOfSight(from, a);
+        return a.distanceTo(from) <= o.weaponRange && grid.hasLineOfSightToClosestTile(from, a);
     }
 
     // ------------------------------------------------------------------ positioning
@@ -384,6 +411,49 @@ public final class InfernoBrain {
         return false;
     }
 
+    /**
+     * The tile with line of sight to the fewest spawn spots (ties: nearest the arena centre,
+     * so every spawn stays within reach). Recomputed from the pillars that still stand.
+     */
+    static WorldPoint standbyTile(InfernoGrid grid) {
+        WorldPoint best = null;
+        double bestScore = Double.MAX_VALUE;
+        double cx = (ARENA_MIN_X + ARENA_MAX_X) / 2.0;
+        double cy = (ARENA_MIN_Y + ARENA_MAX_Y) / 2.0;
+        for (int x = ARENA_MIN_X; x <= ARENA_MAX_X; x++) {
+            for (int y = ARENA_MIN_Y; y <= ARENA_MAX_Y; y++) {
+                WorldPoint t = new WorldPoint(x, y, 0);
+                if (!grid.isStandable(t)) {
+                    continue;
+                }
+                int seen = 0;
+                boolean adjacent = false;
+                for (int[] spot : SPAWN_SPOTS) {
+                    WorldArea a = new WorldArea(spot[0], spot[1], SPAWN_SIZE, SPAWN_SIZE, 0);
+                    if (a.contains(t)) {
+                        seen = 99;
+                        break;
+                    }
+                    if (grid.hasLineOfSight(t, a)) {
+                        seen++;
+                    }
+                    adjacent |= a.distanceTo(t) <= 1;
+                }
+                double score = seen * 10 + (adjacent ? 50 : 0) + 0.1 * Math.hypot(x - cx, y - cy);
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = t;
+                }
+            }
+        }
+        return best;
+    }
+
+    /** Standby tile for a set of pillars (used by the simulator to start a wave). */
+    public static WorldPoint standbyTile(InfernoObservation o) {
+        return standbyTile(buildGrid(o));
+    }
+
     // ------------------------------------------------------------------ prayer
 
     private void choosePrayers(InfernoObservation o, InfernoGrid grid, WorldPoint stand, List<String> actions) {
@@ -507,13 +577,22 @@ public final class InfernoBrain {
             return;
         }
         InfernoObservation.Item use = null;
-        if (o.hp < EAT_BELOW_HP) {
+        // Saradomin brews drain Ranged and Defence: after a few sips a restore comes first,
+        // otherwise sustained healing makes us progressively weaker (observed in simulation).
+        boolean restoreDue = brewSipsSinceRestore >= BREW_SIPS_PER_RESTORE || o.prayer < RESTORE_BELOW_PRAYER;
+        if (restoreDue && o.hp >= CRITICAL_HP) {
+            use = find(o, "SUPER_RESTORE");
+            if (use != null) {
+                brewSipsSinceRestore = 0;
+            }
+        }
+        if (use == null && o.hp < EAT_BELOW_HP) {
             use = find(o, "SARADOMIN_BREW");
             if (use != null) {
                 brewSipsSinceRestore++;
             }
         }
-        if (use == null && (o.prayer < RESTORE_BELOW_PRAYER || brewSipsSinceRestore >= BREW_SIPS_PER_RESTORE)) {
+        if (use == null && restoreDue) {
             use = find(o, "SUPER_RESTORE");
             if (use != null) {
                 brewSipsSinceRestore = 0;
