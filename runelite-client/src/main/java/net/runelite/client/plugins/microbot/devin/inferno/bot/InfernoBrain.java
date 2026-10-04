@@ -30,6 +30,19 @@ import java.util.Set;
  */
 public final class InfernoBrain {
 
+    /**
+     * Strategy weights can be overridden with {@code -Dinferno.NAME=value} so the simulator
+     * harness can tune them; the defaults are the tuned values.
+     */
+    static double tunable(String name, double def) {
+        String v = System.getProperty("inferno." + name);
+        return v == null ? def : Double.parseDouble(v);
+    }
+
+    static int tunableInt(String name, int def) {
+        return (int) Math.round(tunable(name, def));
+    }
+
     /** Walkable arena floor (world), verified from the game cache. */
     static final int ARENA_MIN_X = 2257;
     static final int ARENA_MAX_X = 2285;
@@ -51,32 +64,53 @@ public final class InfernoBrain {
     /** Size assumed for a spawn spot's monster when choosing the standby tile (largest: mager). */
     static final int SPAWN_SIZE = 4;
 
-    static final int SEARCH_RADIUS = 7;
+    static final int SEARCH_RADIUS = tunableInt("SEARCH_RADIUS", 7);
     /** A new tile must beat the current one by this much (HP per tick) to be worth moving. */
-    static final double MOVE_HYSTERESIS = 0.5;
+    static final double MOVE_HYSTERESIS = tunable("MOVE_HYSTERESIS", 0.5);
     /** Ticks to stay committed to a chosen tile (stops tile-to-tile oscillation). */
-    static final int COMMIT_TICKS = 4;
+    static final int COMMIT_TICKS = tunableInt("COMMIT_TICKS", 4);
     /** During a commitment, another tile must beat ours by this much to switch. */
-    static final double COMMIT_MARGIN = 2.0;
+    static final double COMMIT_MARGIN = tunable("COMMIT_MARGIN", 2.0);
     /** Cost of each tile walked, in HP-per-tick units. */
-    static final double MOVE_COST = 0.15;
+    static final double MOVE_COST = tunable("MOVE_COST", 0.15);
     /** Value of being able to hit the kill target this tick (roughly our damage output). */
-    static final double PROGRESS_VALUE = 3.0;
+    static final double PROGRESS_VALUE = tunable("PROGRESS_VALUE", 3.0);
     /** Extra progress value per tick spent unable to attack anything (breaks stalemates). */
-    static final double IDLE_PRESSURE = 0.25;
+    static final double IDLE_PRESSURE = tunable("IDLE_PRESSURE", 0.25);
     /** While idle, cost per tile of distance to the kill target (pulls us toward it). */
-    static final double APPROACH_COST = 0.5;
+    static final double APPROACH_COST = tunable("APPROACH_COST", 0.5);
+    /**
+     * Moving and attacking are exclusive (clicking a monster walks to it), so a tile we must
+     * walk to only earns this share of the attack credit the current tile earns.
+     */
+    static final double MOVE_PROGRESS_DISCOUNT = tunable("MOVE_PROGRESS_DISCOUNT", 0.5);
+    /** Extra cost per consecutive tick spent moving without attacking (stops endless kiting). */
+    static final double KITE_PENALTY = tunable("KITE_PENALTY", 0.3);
+    /**
+     * Progress multiplier when the target is a nibbler eating a standing pillar: pillars are
+     * the run's safespots, and losing them was the main cause of mid-run deaths in simulation.
+     */
+    static final double NIBBLER_FOCUS_WEIGHT = tunable("NIBBLER_FOCUS_WEIGHT", 2.0);
+    /**
+     * After this many ticks unable to attack anything, stop weighing threats and walk to the
+     * nearest tile that can hit the target (stalemates behind pillars otherwise last forever).
+     */
+    static final int ENGAGE_AFTER_IDLE = tunableInt("ENGAGE_AFTER_IDLE", 12);
+    /** 1 = flick protection only on predicted attack ticks; 0 = keep the soonest threat's prayer up. */
+    static final int FLICK_PROTECTION = tunableInt("FLICK_PROTECTION", 1);
+    /** 1 = walk toward nibblers eating a pillar even while other monsters are hittable. */
+    static final int NIBBLER_APPROACH = tunableInt("NIBBLER_APPROACH", 1);
+    /** 1 = offensive prayer only on our attack ticks; 0 = keep it on. */
+    static final int FLICK_OFFENSIVE = tunableInt("FLICK_OFFENSIVE", 1);
     /** Assumed share of a monster's max hit dealt per attack (hit chance x average roll). */
-    static final double EXPECTED_HIT_FRACTION = 0.3;
-    /** Share of a non-prioritised style's damage still blocked by flicking between attacks. */
-    static final double FLICK_COVERAGE = 0.3;
+    static final double EXPECTED_HIT_FRACTION = tunable("EXPECTED_HIT_FRACTION", 0.3);
     static final int BLOB_SCAN_LEAD = 3;
 
-    static final int EAT_BELOW_HP = 55;
+    static final int EAT_BELOW_HP = tunableInt("EAT_BELOW_HP", 55);
     /** Below this, healing beats restoring stats even when a restore is due. */
-    static final int CRITICAL_HP = 30;
-    static final int RESTORE_BELOW_PRAYER = 25;
-    static final int BREW_SIPS_PER_RESTORE = 3;
+    static final int CRITICAL_HP = tunableInt("CRITICAL_HP", 30);
+    static final int RESTORE_BELOW_PRAYER = tunableInt("RESTORE_BELOW_PRAYER", 25);
+    static final int BREW_SIPS_PER_RESTORE = tunableInt("BREW_SIPS_PER_RESTORE", 3);
 
     /** Per-NPC attack bookkeeping from observed animations and projectiles. */
     static final class Tracker {
@@ -98,6 +132,11 @@ public final class InfernoBrain {
     private int brewSipsSinceRestore;
     private int lastUseTick = -10;
     private int idleTicks;
+    /** Consecutive ticks we moved instead of attacking. */
+    private int movingTicks;
+    /** Tick a spell cast was issued, until it fires (-1 = none pending). */
+    private int pendingCastTick = -1;
+    private int lastCooldown;
     /** NPC indices able to attack the player this tick. */
     private final Set<Integer> attackingNow = new HashSet<>();
     private WorldPoint committedTile;
@@ -109,6 +148,9 @@ public final class InfernoBrain {
         brewSipsSinceRestore = 0;
         lastUseTick = -10;
         idleTicks = 0;
+        movingTicks = 0;
+        pendingCastTick = -1;
+        lastCooldown = 0;
         committedTile = null;
         committedUntil = -1;
     }
@@ -143,6 +185,9 @@ public final class InfernoBrain {
         WorldPoint stand = choosePosition(o, grid, me);
         if (!stand.equals(me)) {
             actions.add("MOVE " + stand.getX() + " " + stand.getY());
+            movingTicks++;
+        } else {
+            movingTicks = 0;
         }
 
         choosePrayers(o, grid, stand, actions);
@@ -266,6 +311,14 @@ public final class InfernoBrain {
     private WorldPoint choosePosition(InfernoObservation o, InfernoGrid grid, WorldPoint me) {
         boolean[][] occ = occupied(grid, o);
         Npc focus = firstInKillOrder(o, null, null);
+        if (idleTicks > ENGAGE_AFTER_IDLE) {
+            WorldPoint engage = engageTile(o, grid, occ, me);
+            if (engage != null) {
+                committedTile = engage;
+                committedUntil = o.tick + COMMIT_TICKS;
+                return engage;
+            }
+        }
         double currentScore = tileScore(o, grid, occ, me, me, focus);
         WorldPoint best = me;
         double bestScore = currentScore;
@@ -370,13 +423,27 @@ public final class InfernoBrain {
         double score = unprotected * hpFactor;
 
         double progress = PROGRESS_VALUE + IDLE_PRESSURE * idleTicks;
-        if (focus != null && canHit(grid, o, t, focus)) {
+        boolean defendingPillar = focus != null && !o.pillars.isEmpty()
+                && InfernoNpcType.forNpcId(focus.id) == InfernoNpcType.NIBBLER;
+        if (defendingPillar) {
+            progress *= NIBBLER_FOCUS_WEIGHT;
+        }
+        if (!t.equals(me)) {
+            progress *= MOVE_PROGRESS_DISCOUNT;
+            score += KITE_PENALTY * movingTicks;
+        }
+        boolean focusHittable = focus != null && (canHit(grid, o, t, focus)
+                || (defendingPillar && canBarrage(grid, o, t, focus)));
+        if (focusHittable) {
             score -= progress;
-        } else if (anyHittable(grid, o, t)) {
-            score -= progress / 2;
-        } else if (focus != null && idleTicks > 0) {
-            // Nothing hittable from here: prefer tiles closer to the target so we close in.
-            score += APPROACH_COST * area(focus).distanceTo(t);
+        } else {
+            if (anyHittable(grid, o, t)) {
+                score -= progress / 2;
+            }
+            if (focus != null && (idleTicks > 0 || (defendingPillar && NIBBLER_APPROACH == 1))) {
+                // Out of reach of the target: prefer tiles closer to it so we close in.
+                score += APPROACH_COST * area(focus).distanceTo(t);
+            }
         }
         score += MOVE_COST * Math.max(Math.abs(t.getX() - me.getX()), Math.abs(t.getY() - me.getY()));
         return score;
@@ -407,6 +474,42 @@ public final class InfernoBrain {
             b = tmp;
         }
         return x / a * y;
+    }
+
+    /**
+     * Nearest standable tile from which some monster can be attacked (crossbow, or barrage for
+     * barrage fodder); threats only break ties between equally near tiles.
+     */
+    private WorldPoint engageTile(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me) {
+        WorldPoint best = null;
+        double bestScore = Double.MAX_VALUE;
+        for (int x = ARENA_MIN_X; x <= ARENA_MAX_X; x++) {
+            for (int y = ARENA_MIN_Y; y <= ARENA_MAX_Y; y++) {
+                WorldPoint t = new WorldPoint(x, y, 0);
+                if (!grid.isStandable(t) || occ[x - GRID_BASE_X][y - GRID_BASE_Y]) {
+                    continue;
+                }
+                boolean canAttackFrom = anyHittable(grid, o, t);
+                if (!canAttackFrom) {
+                    for (Npc n : o.npcs) {
+                        if (isBarrageFodder(n) && canBarrage(grid, o, t, n)) {
+                            canAttackFrom = true;
+                            break;
+                        }
+                    }
+                }
+                if (!canAttackFrom) {
+                    continue;
+                }
+                int dist = Math.max(Math.abs(x - me.getX()), Math.abs(y - me.getY()));
+                double score = dist + 0.01 * tileScore(o, grid, occ, me, t, null);
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = t;
+                }
+            }
+        }
+        return best;
     }
 
     /** OSRS Wiki max hits (ranged/magic style, and melee when adjacent). */
@@ -525,17 +628,54 @@ public final class InfernoBrain {
                 soonestPriority = prio;
             }
         }
-        if (wanted == null) {
+        if (wanted == null && FLICK_PROTECTION == 0) {
             wanted = soonestPrayer;
         }
+        if (wanted == null && blobReadsNextTick(o, grid, stand, occ, nextTick)) {
+            // A blob reads our protection on this tick and attacks with the other style 3 ticks
+            // later. With no protection up it picks at random, so show it Magic: it will use
+            // Ranged, which we then protect against.
+            wanted = Prayer.PROTECT_MAGIC;
+        }
 
+        // Prayer drains for every tick it is active, so protection is only up on ticks an
+        // attack can land (flicking) and the offensive prayer only when our own attack fires.
         Prayer current = protectionByTick.get(o.tick);
         if (wanted != null && wanted != current) {
             actions.add("PRAY " + wanted + " 1");
+        } else if (wanted == null && current != null) {
+            actions.add("PRAY " + current + " 0");
         }
-        if (!o.isPrayerActive(Prayer.EAGLE_EYE) && !o.isPrayerActive(Prayer.RIGOUR) && o.prayer > 0) {
-            actions.add("PRAY " + Prayer.EAGLE_EYE + " 1");
+        Prayer offensive = o.isPrayerActive(Prayer.RIGOUR) ? Prayer.RIGOUR : Prayer.EAGLE_EYE;
+        WorldPoint me = new WorldPoint(o.x, o.y, 0);
+        boolean attackingNextTick = FLICK_OFFENSIVE == 0 ? o.prayer > 0
+                : o.attackCooldown <= 1 && o.prayer > 0 && stand.equals(me)
+                && (anyHittable(grid, o, me) || barrageTarget(o, grid, me) != null);
+        if (attackingNextTick && !o.isPrayerActive(offensive)) {
+            actions.add("PRAY " + offensive + " 1");
+        } else if (!attackingNextTick && o.isPrayerActive(offensive)) {
+            actions.add("PRAY " + offensive + " 0");
         }
+    }
+
+    /**
+     * Whether a blob that can attack {@code stand} reads our protection prayer on the next
+     * tick: 3 ticks before its predicted attack, or at any time while its timing is unknown.
+     */
+    private boolean blobReadsNextTick(InfernoObservation o, InfernoGrid grid, WorldPoint stand, boolean[][] occ, int nextTick) {
+        for (Npc n : o.npcs) {
+            Tracker t = trackers.get(n.index);
+            if (t == null || t.type != InfernoNpcType.BLOB) {
+                continue;
+            }
+            if (!InfernoThreatModel.canReachToAttack(grid, t.type, area(n), stand, occ)) {
+                continue;
+            }
+            if (t.nextAttackTick < 0 || t.nextAttackTick - BLOB_SCAN_LEAD <= nextTick) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -615,7 +755,75 @@ public final class InfernoBrain {
         return best;
     }
 
+    /** Ice Barrage: 10-tile range, 3x3 area around the target (OSRS Wiki). */
+    static final int BARRAGE_RANGE = 10;
+
+    /**
+     * Barrage target that catches the most clustered nibblers or blob splits (at least two),
+     * or null. Nibblers are worth barraging while pillars stand: crossbow kills one per attack,
+     * which over a full run loses every pillar (measured in simulation).
+     */
+    private Npc barrageTarget(InfernoObservation o, InfernoGrid grid, WorldPoint me) {
+        if (!o.spells.contains("ICE_BARRAGE")) {
+            return null;
+        }
+        // Normally only clumps are worth a cast; a lone target too when the crossbow cannot
+        // reach anything (position scoring counts barrage range for nibblers, so the two must
+        // agree or we would wait in place forever).
+        Npc best = null;
+        int bestHits = anyHittable(grid, o, me) ? 1 : 0;
+        for (Npc n : o.npcs) {
+            if (!isBarrageFodder(n)) {
+                continue;
+            }
+            WorldArea a = area(n);
+            if (a.distanceTo(me) > BARRAGE_RANGE || !grid.hasLineOfSightToClosestTile(me, a)) {
+                continue;
+            }
+            int hits = 0;
+            for (Npc m : o.npcs) {
+                if (isBarrageFodder(m) && Math.abs(m.x - n.x) <= 1 && Math.abs(m.y - n.y) <= 1) {
+                    hits++;
+                }
+            }
+            if (hits > bestHits) {
+                bestHits = hits;
+                best = n;
+            }
+        }
+        return best;
+    }
+
+    static boolean canBarrage(InfernoGrid grid, InfernoObservation o, WorldPoint from, Npc n) {
+        WorldArea a = area(n);
+        return o.spells.contains("ICE_BARRAGE") && a.distanceTo(from) <= BARRAGE_RANGE
+                && grid.hasLineOfSightToClosestTile(from, a);
+    }
+
+    private static boolean isBarrageFodder(Npc n) {
+        InfernoNpcType t = InfernoNpcType.forNpcId(n.id);
+        return t == InfernoNpcType.NIBBLER || t == InfernoNpcType.BLOB_SPLIT_MAGE
+                || t == InfernoNpcType.BLOB_SPLIT_RANGE || t == InfernoNpcType.BLOB_SPLIT_MELEE;
+    }
+
+    /** Give up waiting for a cast that has not fired after this many ticks. */
+    static final int CAST_TIMEOUT = 3;
+
     private void chooseTarget(InfernoObservation o, InfernoGrid grid, WorldPoint me, List<String> actions) {
+        // A queued cast fires when our attack timer allows; any new attack order before then
+        // cancels it. The cast has fired once the timer jumps back up.
+        boolean castFired = o.attackCooldown > lastCooldown;
+        lastCooldown = o.attackCooldown;
+        if (pendingCastTick >= 0 && !castFired && o.tick - pendingCastTick < CAST_TIMEOUT) {
+            return;
+        }
+        pendingCastTick = -1;
+        Npc clump = barrageTarget(o, grid, me);
+        if (clump != null && o.attackCooldown <= 1) {
+            actions.add("CAST ICE_BARRAGE " + clump.index);
+            pendingCastTick = o.tick;
+            return;
+        }
         Npc target = firstInKillOrder(o, grid, me);
         if (target != null && target.index != o.targetIndex) {
             actions.add("ATTACK " + target.index);
@@ -671,7 +879,7 @@ public final class InfernoBrain {
     }
 
     /** Fragile monsters (two shots or fewer) that are hitting us right now jump the queue. */
-    static final int FRAGILE_ATTACKER_PRIORITY = 5;
+    static final int FRAGILE_ATTACKER_PRIORITY = tunableInt("FRAGILE_ATTACKER_PRIORITY", 5);
 
     private int killPriority(Npc n, InfernoNpcType type, boolean pillarsUp) {
         boolean fragile = type == InfernoNpcType.BAT || type == InfernoNpcType.BLOB_SPLIT_MAGE

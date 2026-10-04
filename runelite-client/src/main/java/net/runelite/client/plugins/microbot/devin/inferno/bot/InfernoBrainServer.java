@@ -17,13 +17,14 @@ import java.util.List;
  *     TICK tick wave
  *     ME x y hp maxHp prayer maxPrayer ranged maxRanged weaponRange attackSpeed cooldown targetIndex prayers(csv|-)
  *     INV slot name doses
+ *     SPELL name                                     castable spell, e.g. ICE_BARRAGE
  *     PILLAR x y hp
  *     NPC index id x y size hpPercent animation
  *     PROJ spotanimId sourceIndex ticksToImpact
  *     END                                            -> brain replies
  *     STANDBY                                        -> MOVE x y END: where to wait for a wave
  *                                                       (uses the preceding PILLAR lines)
- * out PRAY name 0|1 | MOVE x y | ATTACK index | USE slot ... then END
+ * out PRAY name 0|1 | MOVE x y | ATTACK index | CAST spell index | USE slot ... then END
  * </pre>
  */
 public final class InfernoBrainServer {
@@ -72,6 +73,9 @@ public final class InfernoBrainServer {
                     break;
                 case "INV":
                     o.inventory.add(new InfernoObservation.Item(i(f[1]), f[2], i(f[3])));
+                    break;
+                case "SPELL":
+                    o.spells.add(f[1]);
                     break;
                 case "PILLAR":
                     o.pillars.add(new InfernoObservation.Pillar(i(f[1]), i(f[2]), i(f[3])));
