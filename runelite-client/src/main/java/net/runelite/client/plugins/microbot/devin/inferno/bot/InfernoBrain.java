@@ -237,6 +237,7 @@ public final class InfernoBrain {
         List<String> actions = new ArrayList<>();
         recordProtection(o);
         updateTrackers(o);
+        currentWave = o.wave;
         if (DIAG_PRED == 1) {
             checkPredictions(o);
         }
@@ -260,8 +261,12 @@ public final class InfernoBrain {
         }
 
         if (o.npcs.isEmpty()) {
-            // Between waves: wait where the fewest spawn spots can see us.
-            WorldPoint standby = standbyTile(grid);
+            // Between waves: the wiki's spot A at the north pillar, else wait where the fewest
+            // spawn spots can see us.
+            WorldPoint standby = STANDBY_SPOT_A == 1 ? northPillarSpotA(o, grid) : null;
+            if (standby == null) {
+                standby = standbyTile(grid);
+            }
             if (!standby.equals(me)) {
                 actions.add("MOVE " + standby.getX() + " " + standby.getY());
             }
@@ -1351,7 +1356,32 @@ public final class InfernoBrain {
 
     /** Standby tile for a set of pillars (used by the simulator to start a wave). */
     public static WorldPoint standbyTile(InfernoObservation o) {
-        return standbyTile(buildGrid(o));
+        InfernoGrid grid = buildGrid(o);
+        WorldPoint a = STANDBY_SPOT_A == 1 ? northPillarSpotA(o, grid) : null;
+        return a != null ? a : standbyTile(grid);
+    }
+
+    /**
+     * 1 = start each wave on spot A. OSRS Wiki (Inferno/Strategies): "The north pillar is a good
+     * place to start each wave. Specifically, the tile on the western side two north of it ...
+     * will allow you to freeze the nibblers, usually without being in sight of monsters spawning
+     * south." Read as: the pillar's western column, two tiles north of its north edge.
+     */
+    static final int STANDBY_SPOT_A = tunableInt("STANDBY_SPOT_A", 1);
+
+    /** Spot A for the northernmost standing pillar, or null if none / not standable. */
+    static WorldPoint northPillarSpotA(InfernoObservation o, InfernoGrid grid) {
+        InfernoObservation.Pillar north = null;
+        for (InfernoObservation.Pillar p : o.pillars) {
+            if (north == null || p.y > north.y) {
+                north = p;
+            }
+        }
+        if (north == null) {
+            return null;
+        }
+        WorldPoint a = new WorldPoint(north.x, north.y + PILLAR_SIZE - 1 + 2, 0);
+        return grid.isStandable(a) ? a : null;
     }
 
     // ------------------------------------------------------------------ prayer
@@ -2069,6 +2099,9 @@ public final class InfernoBrain {
     static final int BLOB_RESCAN_ON_REGAIN = tunableInt("BLOB_RESCAN_ON_REGAIN", 1);
 
     private int killPriority(Npc n, InfernoNpcType type, boolean pillarsUp) {
+        if (KILL_ORDER_WIKI == 1) {
+            return wikiKillPriority(n, type, pillarsUp);
+        }
         boolean fragile = type == InfernoNpcType.BAT || type == InfernoNpcType.BLOB_SPLIT_MAGE
                 || type == InfernoNpcType.BLOB_SPLIT_RANGE || type == InfernoNpcType.BLOB_SPLIT_MELEE;
         if (fragile && attackingNow.contains(n.index)) {
@@ -2079,6 +2112,26 @@ public final class InfernoBrain {
         }
         return InfernoThreatModelAccess.killPriority(type, pillarsUp);
     }
+
+    /**
+     * 1 = documented kill order. OSRS Wiki (Inferno/Strategies): "When possible, killing the
+     * mager first is a good idea... if you are under attack by another monster, it may be better
+     * to kill that one first." So monsters able to attack us now come first; within each group
+     * the helper table (mager, ranger, meleer, blob, ..., bat), which follows the wiki's
+     * "mager &gt; ranger &gt; meleer &gt; blob &gt; bat". Nibblers lead while pillars stand, except
+     * from wave 50: "do not risk your life over it in the higher waves (50+)".
+     */
+    static final int KILL_ORDER_WIKI = tunableInt("KILL_ORDER_WIKI", 1);
+
+    private int wikiKillPriority(Npc n, InfernoNpcType type, boolean pillarsUp) {
+        if (type == InfernoNpcType.NIBBLER) {
+            return pillarsUp && currentWave < 50 ? -1 : 1000 + type.getKillPriority();
+        }
+        int base = type.getKillPriority();
+        return attackingNow.contains(n.index) ? base : 500 + base;
+    }
+
+    private int currentWave;
 
     /** Small adapter so the brain can reuse the helper's kill priorities. */
     static final class InfernoThreatModelAccess {

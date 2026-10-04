@@ -89,4 +89,17 @@ public class InfernoBrainPathTest {
         assertEquals("enclosed pocket is unreachable", -1, tree[pad + 5][pad + 12]);
         assertEquals("solid tile is unreachable", -1, tree[pad + 2][pad]);
     }
+
+    /** Wiki spot A: "the tile on the western side two north of" the north pillar. */
+    @Test
+    public void spotAIsWestColumnTwoNorthOfNorthPillar() {
+        InfernoObservation o = new InfernoObservation();
+        o.pillars.add(new InfernoObservation.Pillar(2257, 5349, 255));
+        o.pillars.add(new InfernoObservation.Pillar(2274, 5351, 255));
+        o.pillars.add(new InfernoObservation.Pillar(2267, 5335, 255));
+        assertEquals(new WorldPoint(2274, 5355, 0), InfernoBrain.northPillarSpotA(o, InfernoBrain.buildGrid(o)));
+        o.pillars.remove(1);
+        // North pillar gone: the next northernmost (west pillar) is used.
+        assertEquals(new WorldPoint(2257, 5353, 0), InfernoBrain.northPillarSpotA(o, InfernoBrain.buildGrid(o)));
+    }
 }
