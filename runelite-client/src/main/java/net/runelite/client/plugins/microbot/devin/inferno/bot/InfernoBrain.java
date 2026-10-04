@@ -520,6 +520,14 @@ public final class InfernoBrain {
                 return engage;
             }
         }
+        if (BAT_TRAP == 1) {
+            WorldPoint trap = batTrapTile(o, grid, occ, me);
+            if (trap != null) {
+                committedTile = trap;
+                committedUntil = o.tick + 2;
+                return trap;
+            }
+        }
         if (NIBBLER_INTERCEPT == 1) {
             WorldPoint intercept = interceptTile(o, grid, occ, me);
             if (intercept != null) {
@@ -626,6 +634,66 @@ public final class InfernoBrain {
                 double ticks = Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / 2.0);
                 double cost = ticks;
                 if (ticks < bestCost) { // damage only matters among tiles that could still win
+                    cost += INTERCEPT_DAMAGE_WEIGHT * rolloutDamagePerTick(o, grid, occ, t) * ROLLOUT_TICKS;
+                }
+                if (cost < bestCost) {
+                    bestCost = cost;
+                    best = t;
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * 1 = the wiki's bat handling. OSRS Wiki (Inferno/Strategies): bats have "a fairly short
+     * range of four tiles, which potentially allows the player to attack them safely with a
+     * toxic blowpipe on rapid if they are properly safespotted"; "try to get them stuck behind a
+     * pillar and pray against them when possible"; monsters larger than 1x1 "attempt to align
+     * their south-west corner with you if they are unable to attack" and can end up "stuck
+     * behind the pillar". So when a bat can reach us, move to the nearest tile no bat can walk
+     * into attack range of (stuck, or held beyond four tiles) from which we can still shoot one,
+     * weighing the walk and the other monsters' expected damage there.
+     */
+    static final int BAT_TRAP = tunableInt("BAT_TRAP", 1);
+    static final int BAT_TRAP_RADIUS = 6;
+
+    private WorldPoint batTrapTile(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me) {
+        List<Npc> bats = new ArrayList<>();
+        boolean threatened = false;
+        for (Npc n : o.npcs) {
+            if (InfernoNpcType.forNpcId(n.id) == InfernoNpcType.BAT) {
+                bats.add(n);
+                threatened |= InfernoThreatModel.canReachToAttack(grid, InfernoNpcType.BAT, area(n), me, occ);
+            }
+        }
+        if (!threatened) {
+            return null;
+        }
+        WorldPoint best = null;
+        double bestCost = Double.MAX_VALUE;
+        for (int dx = -BAT_TRAP_RADIUS; dx <= BAT_TRAP_RADIUS; dx++) {
+            for (int dy = -BAT_TRAP_RADIUS; dy <= BAT_TRAP_RADIUS; dy++) {
+                WorldPoint t = me.dx(dx).dy(dy);
+                int sx = t.getX() - GRID_BASE_X;
+                int sy = t.getY() - GRID_BASE_Y;
+                if (!grid.isStandable(t) || sx < 0 || sy < 0 || sx >= occ.length || sy >= occ[0].length || occ[sx][sy]) {
+                    continue;
+                }
+                boolean safe = true;
+                boolean canShoot = false;
+                for (Npc b : bats) {
+                    if (InfernoThreatModel.canReachToAttack(grid, InfernoNpcType.BAT, area(b), t, occ)) {
+                        safe = false;
+                        break;
+                    }
+                    canShoot |= canHit(grid, o, t, b);
+                }
+                if (!safe || !canShoot) {
+                    continue;
+                }
+                double cost = Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / 2.0);
+                if (cost < bestCost) {
                     cost += INTERCEPT_DAMAGE_WEIGHT * rolloutDamagePerTick(o, grid, occ, t) * ROLLOUT_TICKS;
                 }
                 if (cost < bestCost) {
@@ -2131,10 +2199,12 @@ public final class InfernoBrain {
      * "mager &gt; ranger &gt; meleer &gt; blob &gt; bat". Nibblers lead while pillars stand, except
      * from wave 50: "do not risk your life over it in the higher waves (50+)".
      */
+    // Default 0 until bat trapping is in (user's call): strict mager-first lets bats live and
+    // hit us (sim 47.1 avg waves vs 52.3) because the wiki's bat handling is missing.
     // 2 = strict mager first, always (chosen by the user as the reading of the wiki);
     // 1 = attackers first, then mager first (sim: 45.2 avg waves vs 50.6); 0 = previous
     // order (fragile attackers first, blob before meleer).
-    static final int KILL_ORDER_WIKI = tunableInt("KILL_ORDER_WIKI", 2);
+    static final int KILL_ORDER_WIKI = tunableInt("KILL_ORDER_WIKI", 0);
 
     private int wikiKillPriority(Npc n, InfernoNpcType type, boolean pillarsUp) {
         if (type == InfernoNpcType.NIBBLER) {
