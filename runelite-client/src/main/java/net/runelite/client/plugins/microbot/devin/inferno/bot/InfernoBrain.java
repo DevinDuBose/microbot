@@ -2102,6 +2102,16 @@ public final class InfernoBrain {
         if (KILL_ORDER_WIKI == 1) {
             return wikiKillPriority(n, type, pillarsUp);
         }
+        if (KILL_ORDER_WIKI == 2) {
+            // Strict "mager first, always" (user's reading of the wiki): the helper table in
+            // order mager > ranger > meleer > blob > bat regardless of who is attacking;
+            // nibblers first while pillars stand. Table: mager 10, ranger 20, meleer 30, blob 40,
+            // splits 45, Jad healer 60, bat 70.
+            if (type == InfernoNpcType.NIBBLER) {
+                return pillarsUp ? -1 : type.getKillPriority();
+            }
+            return type.getKillPriority();
+        }
         boolean fragile = type == InfernoNpcType.BAT || type == InfernoNpcType.BLOB_SPLIT_MAGE
                 || type == InfernoNpcType.BLOB_SPLIT_RANGE || type == InfernoNpcType.BLOB_SPLIT_MELEE;
         if (fragile && attackingNow.contains(n.index)) {
@@ -2121,10 +2131,10 @@ public final class InfernoBrain {
      * "mager &gt; ranger &gt; meleer &gt; blob &gt; bat". Nibblers lead while pillars stand, except
      * from wave 50: "do not risk your life over it in the higher waves (50+)".
      */
-    // Off pending the user's reading of the wiki: with several attackers this kills an
-    // attacking mager before an attacking bat; sim (12 runs, waves 1-66): 45.2 avg waves vs
-    // 50.6, bat damage doubled.
-    static final int KILL_ORDER_WIKI = tunableInt("KILL_ORDER_WIKI", 0);
+    // 2 = strict mager first, always (chosen by the user as the reading of the wiki);
+    // 1 = attackers first, then mager first (sim: 45.2 avg waves vs 50.6); 0 = previous
+    // order (fragile attackers first, blob before meleer).
+    static final int KILL_ORDER_WIKI = tunableInt("KILL_ORDER_WIKI", 2);
 
     private int wikiKillPriority(Npc n, InfernoNpcType type, boolean pillarsUp) {
         if (type == InfernoNpcType.NIBBLER) {
