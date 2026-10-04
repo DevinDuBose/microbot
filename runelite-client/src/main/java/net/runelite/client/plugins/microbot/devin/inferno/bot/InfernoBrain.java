@@ -515,6 +515,10 @@ public final class InfernoBrain {
         boolean[][] occ = occupied(grid, o);
         Npc focus = firstInKillOrder(o, null, null);
         offTickTarget = -1;
+        WorldPoint out = stepOutFromUnder(o, grid, occ, me);
+        if (out != null) {
+            return out;
+        }
         if (MELEER_DIG_WAIT == 1 && waitForMeleerDig(o, grid, occ, me)) {
             techLog(o, "MELEER_DIG_WAIT at " + me);
             return me;
@@ -733,6 +737,49 @@ public final class InfernoBrain {
                 if (cost < bestCost) {
                     bestCost = cost;
                     best = t;
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * A monster standing on our tile cannot attack us, and (RS Mod NpcInteractionProcessor, the
+     * "Red-X" rule) does not step off while we have a target, while we cannot attack it from
+     * inside it: a stalemate (sim: 60000 ticks). Walk out from under it to the nearest free tile,
+     * preferring one from which we can hit it.
+     */
+    private WorldPoint stepOutFromUnder(InfernoObservation o, InfernoGrid grid, boolean[][] occ, WorldPoint me) {
+        Npc under = null;
+        for (Npc n : o.npcs) {
+            InfernoNpcType type = InfernoNpcType.forNpcId(n.id);
+            if (type != null && type != InfernoNpcType.NIBBLER && area(n).contains(me)) {
+                under = n;
+                break;
+            }
+        }
+        if (under == null) {
+            return null;
+        }
+        WorldPoint best = null;
+        int bestKey = Integer.MAX_VALUE;
+        for (int r = 1; r <= 5 && best == null; r++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dy = -r; dy <= r; dy++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dy)) != r) {
+                        continue;
+                    }
+                    WorldPoint t = me.dx(dx).dy(dy);
+                    int sx = t.getX() - GRID_BASE_X;
+                    int sy = t.getY() - GRID_BASE_Y;
+                    if (!grid.isStandable(t) || sx < 0 || sy < 0 || sx >= occ.length || sy >= occ[0].length || occ[sx][sy]) {
+                        continue;
+                    }
+                    int key = canHit(grid, o, t, under) ? 0 : 1;
+                    if (key < bestKey) {
+                        bestKey = key;
+                        best = t;
+                    }
                 }
             }
         }
