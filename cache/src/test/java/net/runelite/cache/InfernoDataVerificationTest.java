@@ -200,10 +200,26 @@ public class InfernoDataVerificationTest
 			net.runelite.cache.definitions.LocationsDefinition locs = loader.loadLocDef(9043);
 			assertTrue("could not decrypt region 9043 locations", locs != null);
 
+			// Client collision rules: blocked floor tiles (settings & 1), floor decorations
+			// (type 22) only when interactType == 1, walls (types 0-3) as edges, and every other
+			// non-decoration object (types 9-21) when interactType != 0.
+			// Legend: '~' blocked floor, 'f' blocking floor decoration, 'w' wall edge,
+			// '#' solid + blocks line of sight, 'o' solid only, '.' open.
 			char[][] grid = new char[64][64];
 			for (char[] row : grid)
 			{
 				java.util.Arrays.fill(row, '.');
+			}
+			net.runelite.cache.definitions.MapDefinition map = loader.loadMapDef(9043);
+			for (int x = 0; x < 64; x++)
+			{
+				for (int y = 0; y < 64; y++)
+				{
+					if ((map.getTiles()[0][x][y].getSettings() & 1) != 0)
+					{
+						grid[y][x] = '~';
+					}
+				}
 			}
 			for (net.runelite.cache.region.Location loc : locs.getLocations())
 			{
@@ -212,41 +228,71 @@ public class InfernoDataVerificationTest
 					continue;
 				}
 				ObjectDefinition def = objects.getObject(loc.getId());
-				int lx = loc.getPosition().getX() & 63;
-				int ly = loc.getPosition().getY() & 63;
-				boolean pillar = loc.getId() >= 30284 && loc.getId() <= 30287;
-				if (pillar)
-				{
-					System.out.printf("pillar obj=%d type=%d local=(%d,%d) world=(%d,%d)%n", loc.getId(), loc.getType(), lx, ly, loc.getPosition().getX(), loc.getPosition().getY());
-				}
-				if (def == null || def.getInteractType() == 0)
+				if (def == null)
 				{
 					continue;
 				}
+				int lx = loc.getPosition().getX() & 63;
+				int ly = loc.getPosition().getY() & 63;
+				int type = loc.getType();
 				int sx = (loc.getOrientation() & 1) == 1 ? def.getSizeY() : def.getSizeX();
 				int sy = (loc.getOrientation() & 1) == 1 ? def.getSizeX() : def.getSizeY();
-				char c = pillar ? 'P' : (def.isBlocksProjectile() ? '#' : 'o');
-				// types 0-3 are walls (edge collision), 22 is floor decoration
-				if (loc.getType() <= 3)
+				char c;
+				if (type == 22)
 				{
-					c = def.isBlocksProjectile() ? 'w' : 'v';
+					if (def.getInteractType() != 1)
+					{
+						continue;
+					}
+					c = 'f';
 					sx = 1;
 					sy = 1;
+				}
+				else if (type <= 3)
+				{
+					if (def.getInteractType() == 0)
+					{
+						continue;
+					}
+					c = 'w';
+					sx = 1;
+					sy = 1;
+				}
+				else if (type >= 9)
+				{
+					if (def.getInteractType() == 0)
+					{
+						continue;
+					}
+					c = def.isBlocksProjectile() ? '#' : 'o';
+				}
+				else
+				{
+					continue; // wall decorations never collide
 				}
 				for (int x = lx; x < Math.min(64, lx + sx); x++)
 				{
 					for (int y = ly; y < Math.min(64, ly + sy); y++)
 					{
-						if (grid[y][x] != 'P')
-						{
-							grid[y][x] = c;
-						}
+						grid[y][x] = c;
 					}
 				}
 			}
 			for (int y = 63; y >= 0; y--)
 			{
 				System.out.printf("%2d %s%n", y, new String(grid[y]));
+			}
+
+			// The arena floor is exactly the open rectangle local x 17..45, y 17..46
+			// (world 2257..2285, 5329..5358), bordered by blocked tiles. The InfernoTrainer
+			// simulator's walkable area maps onto this with world = (simX + 2246, 5372 - simY).
+			for (int x = 16; x <= 46; x++)
+			{
+				for (int y = 16; y <= 47; y++)
+				{
+					boolean inside = x >= 17 && x <= 45 && y >= 17 && y <= 46;
+					assertTrue("tile " + x + "," + y + " is '" + grid[y][x] + "'", inside == (grid[y][x] == '.'));
+				}
 			}
 		}
 	}
