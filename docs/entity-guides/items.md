@@ -261,3 +261,35 @@ Microbot.getClientThread().runOnClientThreadOptional(() -> Microbot.getClient().
 ```
 
 **Where this applies:** `Rs2GrandExchange`, `GrandExchangeWidget`, `Rs2Dialogue`, `Rs2Bank` X-amount prompts, and any helper reading chatbox prompts or GE offer state.
+
+
+## 15. Suppress AutoLogin only for confirmed terminal supply stops
+
+An ordinary logout can be a break or world hop, so it must keep normal AutoLogin behavior. After confirming a required supply is unavailable in a live bank mirror, call `Rs2Player.logoutWithoutAutoLogin()` off the client thread and cancel the owning run's scheduler. Existing Inventory Setup callers retain their global-pause behavior. Scripts that prefer terminal logout must opt in per loader with `withMissingSupplyPolicy(Rs2InventorySetup.MissingSupplyPolicy.LOGOUT_AND_STOP)`; do not globally change every plugin's supply policy. Partial-stack acceptance and optional supply fallbacks remain separate.
+
+**Why this matters:** AutoLogin otherwise logs back in after supply exhaustion and the stopped bank loop retries indefinitely. Suppression clears on a new gameplay script run, a manual login after the logout, or an AutoLogin restart. Background AutoLogin and BreakHandler starts do not clear it.
+
+**Pattern to follow:** The helper arms suppression before closing the bank and reports whether logout was observed or only requested. Uncompleted requests expire after 15 seconds using a monotonic clock, including when no game-state event occurs; observed terminal logouts do not expire. Ordinary `logout()` is unchanged; scripts that use it for terminal failure must explicitly adopt the new API.
+
+**Defensive check:** Run `AutoLoginSuppressionTest`, `AutoLoginPluginSupplyStopTest`, `ScriptStartedTest`, `TerminalSupplyLogoutTest`, and `InventorySetupSupplyLogoutTest`. Verify live that a shortage stays logged out and restarting a gameplay script permits login.
+
+
+## 16. Bank widgets can be missing or blank right after the bank opens
+
+`BANK_ITEM_CONTAINER` can be null and the `BANK_ITEM_COUNT_TOP` text can be `""` while the bank interface is opening, closing or rebuilding. Never `assert` a widget non-null (asserts are disabled at runtime) and never `Integer.parseInt` widget text without handling blank or non-numeric input. `Rs2Bank.getBankItemCount()` returns 0 for unpopulated text, and `scrollBankToSlot` returns false before computing a scroll when the container is missing. The looting bag view (`15:11`) can be unloaded or have null/empty children once the bag closes, so `depositLootingBag` waits on `Rs2Bank.isLootingBagViewEmpty()`, which reads the widget on the client thread and treats a missing widget or children as emptied.
+
+**Defensive check:** Run `Rs2BankUnloadedWidgetsTest` and `Rs2BankLootingBagViewTest`.
+
+
+## 17. An inventory container may have no child for the item's slot
+
+While a shop, bank, deposit box or Grand Exchange inventory is open or rebuilding, the active container's children may not include a widget whose index matches `Rs2ItemModel.getSlot()`. Look the child up with `findFirst().orElse(null)` and fall back to `rs2Item.getInventoryActions()`; never pass `null` to `Optional.orElseGet`, which throws an NPE instead of returning null.
+
+**Defensive check:** Run `Rs2InventoryInvokeMenuTest`.
+
+
+## Terminal supply stops need observed logout
+
+An owning script can set `withMissingSupplyHandler` on its Inventory Setup loader to keep its scheduled loop alive while `TerminalLogoutPrompt` closes the bank and requests logout. Do not show a blocking shortage notification or cancel that loop until `LOGGED_OUT` is observed. The default loader policy stays unchanged when no handler is supplied; ordinary breaks and world hops do not arm terminal Auto Login suppression.
+
+The observed terminal state is `LOGIN_SCREEN`; loading, hopping, connection loss and login transitions are not successful logout. A terminal prompt requests Auto Login suppression once across its retries so an explicit script/Auto Login restart is not repeatedly re-blocked by the old prompt.

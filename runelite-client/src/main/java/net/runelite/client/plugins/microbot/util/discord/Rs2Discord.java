@@ -86,18 +86,15 @@ public class Rs2Discord {
 
             try (Response response = httpClient.newCall(request).execute()) {
                 if (!response.isSuccessful()) {
-                    Microbot.log("Failed to send Discord notification. Error Code: " + response.code() 
-                            + " - URL marked as invalid: " + webHookUrl);
+                    Microbot.log("Failed to send Discord notification. Error Code: " + response.code());
                 }
                 return response.isSuccessful();
             }
         } catch (IllegalArgumentException e) {
-            Microbot.log("Invalid Discord webhook URL format - URL marked as invalid: " + webHookUrl 
-                    + " - Error: " + e.getMessage());
+            Microbot.log("Invalid Discord webhook URL format");
             return false;
         } catch (IOException e) {
-            Microbot.log("Error while sending Discord notification to URL: " + webHookUrl 
-                    + " - Error: " + e.getMessage());
+            Microbot.log("Error while sending Discord notification: " + e.getClass().getSimpleName());
             return false;
         }
     }
@@ -184,7 +181,7 @@ public class Rs2Discord {
         embed.setDescription(description);
         embed.setColor(color);
         embed.addField(new DiscordEmbed.Field("Player", 
-                playerName.isEmpty() ? "Unknown" : playerName, true));
+                playerName == null || playerName.isEmpty() ? "Unknown" : playerName, true));
         embed.addField(new DiscordEmbed.Field("Time", timestamp, true));
         embed.addField(new DiscordEmbed.Field("Source", source, true));
         embed.setFooter(new DiscordEmbed.Footer("Microbot", null));
@@ -284,6 +281,6 @@ public class Rs2Discord {
      * creates a player field
      */
     public static DiscordEmbed.Field createPlayerField(String playerName) {
-        return createField("Player", playerName.isEmpty() ? "Unknown" : playerName, true);
+        return createField("Player", playerName == null || playerName.isEmpty() ? "Unknown" : playerName, true);
     }
 }

@@ -7,6 +7,8 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.client.config.ConfigProfile;
 import net.runelite.client.plugins.microbot.Microbot;
+import net.runelite.client.plugins.microbot.util.security.HopBudget;
+import net.runelite.client.plugins.microbot.util.security.LoginLockout;
 import net.runelite.client.plugins.microbot.util.security.LoginManager;
 
 import java.io.IOException;
@@ -22,12 +24,14 @@ public class LoginHandler extends AgentHandler {
 	private static final int LOGIN_INDEX_BANNED = 14;
 	private static final int LOGIN_INDEX_DISCONNECTED = 24;
 	private static final int LOGIN_INDEX_NON_MEMBER = 34;
+	private static final int LOGIN_INDEX_TOO_MANY_ATTEMPTS = LoginLockout.LOGIN_INDEX_TOO_MANY_ATTEMPTS;
 
 	private static final Set<Integer> FATAL_LOGIN_INDICES = Set.of(
 			LOGIN_INDEX_AUTH_FAILURE,
 			LOGIN_INDEX_INVALID_CREDENTIALS,
 			LOGIN_INDEX_BANNED,
-			LOGIN_INDEX_NON_MEMBER
+			LOGIN_INDEX_NON_MEMBER,
+			LOGIN_INDEX_TOO_MANY_ATTEMPTS
 	);
 
 	private static final int DEFAULT_TIMEOUT_SECONDS = 30;
@@ -72,6 +76,15 @@ public class LoginHandler extends AgentHandler {
 		result.put("loggedIn", Microbot.isLoggedIn());
 		result.put("gameState", gameState.name());
 		result.put("loginAttemptActive", LoginManager.isLoginAttemptActive());
+		long loginCooldownMs = LoginLockout.getInstance().remainingMillis();
+		if (loginCooldownMs > 0) {
+			result.put("loginCooldownMs", loginCooldownMs);
+		}
+		HopBudget hopBudget = HopBudget.getInstance();
+		if (hopBudget.isEnabled()) {
+			result.put("hopsAvailable", hopBudget.available());
+			result.put("nextHopInMs", hopBudget.millisUntilHopAllowed());
+		}
 
 		if (Microbot.isLoggedIn()) {
 			long durationMs = LoginManager.getLoginDuration().toMillis();
@@ -127,14 +140,16 @@ public class LoginHandler extends AgentHandler {
 		int timeoutSeconds = DEFAULT_TIMEOUT_SECONDS;
 
 		if (body != null) {
-			if (body.containsKey("world")) {
-				targetWorld = ((Number) body.get("world")).intValue();
+			Integer world = getIntField(body, "world");
+			if (world != null) {
+				targetWorld = world;
 			}
 			if (body.containsKey("wait")) {
-				wait = Boolean.TRUE.equals(body.get("wait"));
+				wait = Boolean.TRUE.equals(getBooleanField(body, "wait"));
 			}
-			if (body.containsKey("timeout")) {
-				timeoutSeconds = Math.min(((Number) body.get("timeout")).intValue(), MAX_TIMEOUT_SECONDS);
+			Integer timeout = getIntField(body, "timeout");
+			if (timeout != null) {
+				timeoutSeconds = Math.min(timeout, MAX_TIMEOUT_SECONDS);
 				if (timeoutSeconds <= 0) timeoutSeconds = DEFAULT_TIMEOUT_SECONDS;
 			}
 		}
@@ -149,6 +164,11 @@ public class LoginHandler extends AgentHandler {
 		} catch (Exception e) {
 			log.error("Login attempt failed", e);
 			sendJson(exchange, 500, errorResponse("Login failed: " + e.getMessage()));
+			return;
+		}
+
+		if (!loginInitiated && LoginLockout.getInstance().isActive()) {
+			sendLoginCooldown(exchange);
 			return;
 		}
 
@@ -173,6 +193,12 @@ public class LoginHandler extends AgentHandler {
 
 		LoginResult loginResult = waitForLoginResult(timeoutSeconds);
 
+		if (!loginResult.success && LoginLockout.isLockoutLoginIndex(loginResult.loginIndex)) {
+			LoginManager.checkLoginLockout();
+			sendLoginCooldown(exchange);
+			return;
+		}
+
 		Map<String, Object> result = new LinkedHashMap<>();
 		result.put("success", loginResult.success);
 		result.put("message", loginResult.message);
@@ -187,6 +213,15 @@ public class LoginHandler extends AgentHandler {
 		}
 
 		sendJson(exchange, loginResult.success ? 200 : 401, result);
+	}
+
+	private void sendLoginCooldown(HttpExchange exchange) throws IOException {
+		Map<String, Object> result = new LinkedHashMap<>();
+		result.put("success", false);
+		result.put("message", "Too many login attempts - login paused until the cooldown ends");
+		result.put("loginIndex", LOGIN_INDEX_TOO_MANY_ATTEMPTS);
+		result.put("loginCooldownMs", LoginLockout.getInstance().remainingMillis());
+		sendJson(exchange, 429, result);
 	}
 
 	private LoginResult waitForLoginResult(int timeoutSeconds) {
@@ -260,6 +295,8 @@ public class LoginHandler extends AgentHandler {
 				return "Disconnected from server";
 			case LOGIN_INDEX_NON_MEMBER:
 				return "Non-member account cannot login to members world";
+			case LOGIN_INDEX_TOO_MANY_ATTEMPTS:
+				return "Too many login attempts - wait before retrying";
 			default:
 				return null;
 		}

@@ -268,6 +268,7 @@ public class RuneLiteDebug {
                     options.has("disable-walker-update"),
                     options.valueOf(sessionfile),
                     (String) options.valueOf("profile"),
+                    null,
                     options.has(insecureWriteCredentials),
                     options.has("noupdate")
             ));

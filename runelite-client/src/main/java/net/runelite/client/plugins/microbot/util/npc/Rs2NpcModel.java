@@ -6,11 +6,12 @@ import net.runelite.api.HeadIcon;
 import net.runelite.api.NPC;
 import net.runelite.api.NPCComposition;
 import net.runelite.api.NpcOverrides;
+import net.runelite.api.Player;
+import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.api.IEntity;
 import net.runelite.client.plugins.microbot.util.ActorModel;
-import org.apache.commons.lang3.NotImplementedException;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Arrays;
@@ -89,8 +90,13 @@ public class Rs2NpcModel extends ActorModel implements NPC
 	 */
 	public boolean isWithinDistanceFromPlayer(int maxDistance) {
 		return Microbot.getClientThread().runOnClientThreadOptional(() -> {
-			return this.getLocalLocation().distanceTo(
-					Microbot.getClient().getLocalPlayer().getLocalLocation()) <= maxDistance;
+			Player localPlayer = Microbot.getClient().getLocalPlayer();
+			LocalPoint playerLocation = localPlayer == null ? null : localPlayer.getLocalLocation();
+			LocalPoint npcLocation = this.getLocalLocation();
+			if (playerLocation == null || npcLocation == null) {
+				return false;
+			}
+			return npcLocation.distanceTo(playerLocation) <= maxDistance;
 		}).orElse(false);
 	}
 
@@ -102,8 +108,13 @@ public class Rs2NpcModel extends ActorModel implements NPC
 	 */
 	public int getDistanceFromPlayer() {
 		return Microbot.getClientThread().runOnClientThreadOptional(() -> {
-			return this.getLocalLocation().distanceTo(
-					Microbot.getClient().getLocalPlayer().getLocalLocation());
+			Player localPlayer = Microbot.getClient().getLocalPlayer();
+			LocalPoint playerLocation = localPlayer == null ? null : localPlayer.getLocalLocation();
+			LocalPoint npcLocation = this.getLocalLocation();
+			if (playerLocation == null || npcLocation == null) {
+				return Integer.MAX_VALUE;
+			}
+			return npcLocation.distanceTo(playerLocation);
 		}).orElse(Integer.MAX_VALUE);
 	}
 

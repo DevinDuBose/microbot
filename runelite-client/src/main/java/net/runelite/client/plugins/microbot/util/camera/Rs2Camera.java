@@ -26,39 +26,29 @@ public class Rs2Camera {
     private static final int LEGACY_MAX_PITCH = 383;
 
     public static int angleToTile(Actor t) {
-        return Microbot.getClientThread().invoke(() -> {
-            var playerLocation = new Rs2PlayerModel().getWorldLocation();
-            int angle = (int) Math.toDegrees(Math.atan2(t.getWorldLocation().getY() - playerLocation.getY(),
-                    t.getWorldLocation().getX() - playerLocation.getX()));
-            return angle >= 0 ? angle : 360 + angle;
-        });
+        return Microbot.getClientThread().invoke(() -> angleFromPlayer(t.getWorldLocation().getX(), t.getWorldLocation().getY()));
     }
 
     public static int angleToTile(TileObject t) {
-        return Microbot.getClientThread().invoke(() -> {
-            var playerLocation = new Rs2PlayerModel().getWorldLocation();
-            int angle = (int) Math.toDegrees(Math.atan2(t.getWorldLocation().getY() - playerLocation.getY(),
-                    t.getWorldLocation().getX() - playerLocation.getX()));
-            return angle >= 0 ? angle : 360 + angle;
-        });
+        return Microbot.getClientThread().invoke(() -> angleFromPlayer(t.getWorldLocation().getX(), t.getWorldLocation().getY()));
     }
 
     public static int angleToTile(LocalPoint localPoint) {
-        return Microbot.getClientThread().invoke(() -> {
-            var playerLocation = new Rs2PlayerModel().getWorldLocation();
-            int angle = (int) Math.toDegrees(Math.atan2(localPoint.getY() - playerLocation.getY(),
-                    localPoint.getX() - playerLocation.getX()));
-            return angle >= 0 ? angle : 360 + angle;
-        });
+        return Microbot.getClientThread().invoke(() -> angleFromPlayer(localPoint.getX(), localPoint.getY()));
     }
 
     public static int angleToTile(WorldPoint worldPoint) {
-        return Microbot.getClientThread().invoke(() -> {
-            var playerLocation = new Rs2PlayerModel().getWorldLocation();
-            int angle = (int) Math.toDegrees(Math.atan2(worldPoint.getY() - playerLocation.getY(),
-                    worldPoint.getX() - playerLocation.getX()));
-            return angle >= 0 ? angle : 360 + angle;
-        });
+        return Microbot.getClientThread().invoke(() -> angleFromPlayer(worldPoint.getX(), worldPoint.getY()));
+    }
+
+    private static int angleFromPlayer(int targetX, int targetY) {
+        var playerLocation = new Rs2PlayerModel().getWorldLocation();
+        if (playerLocation == null) {
+            int facing = (int) (fromClientAngleUnits(readYawDirectly()) * (360.0 / LEGACY_ANGLE_UNITS));
+            return (facing + 90) % 360;
+        }
+        int angle = (int) Math.toDegrees(Math.atan2(targetY - playerLocation.getY(), targetX - playerLocation.getX()));
+        return angle >= 0 ? angle : 360 + angle;
     }
 
     public static void turnTo(final Actor actor) {
@@ -148,7 +138,7 @@ public class Rs2Camera {
 
         if (currentPitchPercentage < percentage) {
             holdUntil(KeyEvent.VK_UP, () -> cameraPitchPercentage() >= percentage);
-        } else {
+        } else if (currentPitchPercentage > percentage) {
             holdUntil(KeyEvent.VK_DOWN, () -> cameraPitchPercentage() <= percentage);
         }
     }
@@ -165,10 +155,39 @@ public class Rs2Camera {
         } finally {
             Rs2Keyboard.keyRelease(keyCode);
         }
+        if (!awaitCameraSettled()) {
+            log.debug("Camera did not settle within {}ms after releasing key {}", SETTLE_TIMEOUT_MS, keyCode);
+        }
+    }
+
+    static final int SETTLE_TIMEOUT_MS = 600;
+
+    static boolean awaitCameraSettled() {
+        int[][] previous = new int[1][];
+        return Global.sleepUntil(() -> {
+            int[] sample = sampleCamera();
+            if (sample == null) {
+                return false;
+            }
+            int[] last = previous[0];
+            previous[0] = sample;
+            return last != null && sample[0] != last[0] && sample[1] == last[1] && sample[2] == last[2];
+        }, SETTLE_TIMEOUT_MS);
+    }
+
+    private static int[] sampleCamera() {
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            Client client = Microbot.getClient();
+            return new int[]{client.getGameCycle(), client.getCameraYaw(), client.getCameraPitch()};
+        }).orElse(null);
     }
 
     public static int getPitch() {
-        return fromClientAngleUnits(Microbot.getClient().getCameraPitch());
+        return fromClientAngleUnits(Microbot.getClientThread().runOnClientThreadOptional(() -> Microbot.getClient().getCameraPitch()).orElseGet(Rs2Camera::readPitchDirectly));
+    }
+
+    private static int readPitchDirectly() {
+        return Microbot.getClient().getCameraPitch();
     }
 
     // set camera pitch
@@ -243,11 +262,14 @@ public class Rs2Camera {
     }
 
     public static boolean isTileOnScreen(TileObject tileObject) {
-        int viewportHeight = Microbot.getClient().getViewportHeight();
-        int viewportWidth = Microbot.getClient().getViewportWidth();
+        Client client = Microbot.getClient();
+        LocalPoint localPoint = tileObject.getLocalLocation();
+        if (!isInWorldViewScene(client, localPoint)) return false;
 
+        int viewportHeight = client.getViewportHeight();
+        int viewportWidth = client.getViewportWidth();
 
-        Polygon poly = Perspective.getCanvasTilePoly(Microbot.getClient(), tileObject.getLocalLocation());
+        Polygon poly = Perspective.getCanvasTilePoly(client, localPoint);
 
         if (poly == null) return false;
 
@@ -256,6 +278,8 @@ public class Rs2Camera {
 
     public static boolean isTileOnScreen(LocalPoint localPoint) {
         Client client = Microbot.getClient();
+        if (!isInWorldViewScene(client, localPoint)) return false;
+
         int viewportHeight = client.getViewportHeight();
         int viewportWidth = client.getViewportWidth();
 
@@ -271,6 +295,18 @@ public class Rs2Camera {
         return canvasPoint != null;
     }
 
+    private static boolean isInWorldViewScene(Client client, LocalPoint localPoint) {
+        if (localPoint == null) return false;
+        int sceneX = localPoint.getSceneX();
+        int sceneY = localPoint.getSceneY();
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            WorldView worldView = client.getWorldView(localPoint.getWorldView());
+            return worldView != null
+                    && sceneX >= 0 && sceneY >= 0
+                    && sceneX < worldView.getSizeX() && sceneY < worldView.getSizeY();
+        }).orElse(false);
+    }
+
     // get the camera zoom
     public static int getZoom() {
         return Microbot.getClient().getVarcIntValue(VarClientInt.CAMERA_ZOOM_RESIZABLE_VIEWPORT);
@@ -283,7 +319,11 @@ public class Rs2Camera {
     }
     // Get camera/compass facing
     public static int getYaw() {
-        return fromClientAngleUnits(Microbot.getClient().getCameraYaw());
+        return fromClientAngleUnits(Microbot.getClientThread().runOnClientThreadOptional(() -> Microbot.getClient().getCameraYaw()).orElseGet(Rs2Camera::readYawDirectly));
+    }
+
+    private static int readYawDirectly() {
+        return Microbot.getClient().getCameraYaw();
     }
 
     // Set camera/compass facing

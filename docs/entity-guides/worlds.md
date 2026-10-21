@@ -19,3 +19,32 @@ int ping = Ping.tcpPing(InetAddress.getByName(world.getAddress()));
 **Where this applies:** `Ping`, `Rs2WorldUtil`, world selectors, login-world scoring, and any helper that tests world reachability.
 
 **Defensive check:** Test fallback with local sockets so the first port refuses the connection and the second succeeds. Live endpoint probes are useful evidence, but must not become a permanent world-to-port mapping.
+
+## 2. Treat the local player as absent during login, hop, and loading
+
+`Client.getLocalPlayer()` returns `null` on the login screen, while hopping, and during some loading states. Scripts keep ticking through those states, so any helper that reads the local player must check for `null` and return the value its callers already treat as "no player".
+
+**Why this matters:** `Rs2Player.getWorldLocation_Internal()` and `Rs2Player.getPoseAnimation()` dereferenced the local player directly. Telemetry for 2.6.30 recorded about 100 NullPointerExceptions from these lambdas in one day, many reached through `Rs2PlayerStateCache.refreshLocalPlayer()` from ordinary `Rs2Player.getWorldLocation()` calls.
+
+**Pattern to follow:**
+
+```java
+// Wrong: throws on the client thread whenever the player is not loaded.
+return Microbot.getClientThread().runOnClientThreadOptional(() ->
+        Microbot.getClient().getLocalPlayer().getPoseAnimation()
+).orElse(-1);
+
+// Right: read once, yield an empty Optional, and let orElse supply the "no player" value.
+return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+    Player localPlayer = Microbot.getClient().getLocalPlayer();
+    return localPlayer == null ? null : localPlayer.getPoseAnimation();
+}).orElse(-1);
+```
+
+**Where this applies:** `Rs2Player` accessors (`getWorldLocation_Internal`, `getPoseAnimation`, `getAnimation`, `getCombatLevel`, `getLocalPlayer`, `getLocalLocation`, `getGraphicId`, `hasSpotAnimation`), the position accessors of `Rs2ActorModel` (`getWorldView`, `getWorldLocation`, `getLocalLocation`, `projectActorLocationToMainWorld`) and its `getAnimation` (returns -1), which `new Rs2PlayerModel()` reaches with a null actor, the callers of those accessors (`Rs2Camera.angleToTile` returns the current facing so a turn is a no-op), both `Rs2NpcModel` classes' `getDistanceFromPlayer` (returns `Integer.MAX_VALUE`) and `isWithinDistanceFromPlayer` (returns `false`), `Rs2GameObject.clickObject` (returns `false` when it falls back to world-point distance), `Rs2GroundItem.getAllFromWorldPoint` (returns an empty array, and sorts against one captured `LocalPoint` instead of re-reading the player in the comparator), and any new helper that reads the local player.
+
+**Defensive check:** Mock `Client.getLocalPlayer()` to return `null` and assert each accessor returns its fallback, as in `Rs2PlayerNullLocalPlayerTest`, `Rs2PlayerModelNullLocalPlayerTest`, `Rs2NpcModelDistanceFromPlayerTest` and `Rs2GroundItemNullLocalPlayerTest`.
+
+**Wrapped locations:** `Rs2Player.getRs2WorldPoint()` still returns an `Rs2WorldPoint`, but it can wrap a `null` `WorldPoint` in these states. `pathTo` returns `null` and `distanceToPath` returns `Integer.MAX_VALUE` for it; check `getWorldPoint() != null` before calling `getX()`, `getY()` or `getPlane()`, as in `Rs2WorldPointNullPointTest`.
+
+**Location consumers:** `Rs2Player.getWorldLocation()` itself returns `null` in these states. Guard it before passing it to `Rs2RouteRequest.to`/`toAny` (which reject a null start) or `WorldPoint.distanceTo`. `Rs2Bank.getNearestBank`, `getNearestBankRoute` and `getPathToNearestBank` return no bank, `isNearBank` and `walkToBank` return `false`, `BankLocation.MINING_GUILD.hasRequirements` returns `false`, `Rs2Walker.getDistanceBetween` returns `Integer.MAX_VALUE` for a null endpoint, as in `Rs2BankNullPlayerLocationTest`, and `Rs2Walker.proximityWaitSatisfied` returns `false` for a null location, so once the `processWalk` post-click wait reaches it (the player is still moving after 600 ms) it keeps waiting until its timeout, as in `Rs2WalkerProximityWaitTest`.

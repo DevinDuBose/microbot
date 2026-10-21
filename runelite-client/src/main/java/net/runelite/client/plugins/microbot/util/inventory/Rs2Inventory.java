@@ -27,7 +27,6 @@ import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.shop.Rs2Shop;
 import net.runelite.client.plugins.microbot.util.tabs.Rs2Tab;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
-import org.apache.commons.lang3.NotImplementedException;
 import org.slf4j.event.Level;
 
 import java.awt.*;
@@ -1331,15 +1330,6 @@ public class Rs2Inventory {
     }
 
     /**
-     * Checks whether the inventory is configured to ignore whether shift interactions are enabled or not.
-     *
-     * @return True if the inventory ignores shift interactions, false otherwise.
-     */
-    public static boolean isForceNoShift() {
-        throw new NotImplementedException("TODO");
-    }
-
-    /**
      * Determines whether the inventory is full (all slots are occupied).
      *
      * @return True if the inventory is full, false otherwise.
@@ -1938,7 +1928,7 @@ public class Rs2Inventory {
         if (inventoryWidgets == null) return;
 
         if (!action.isEmpty()) {
-            var itemWidget = Arrays.stream(inventoryWidgets).filter(x -> x != null && x.getIndex() == rs2Item.getSlot()).findFirst().orElseGet(null);
+            var itemWidget = Arrays.stream(inventoryWidgets).filter(x -> x != null && x.getIndex() == rs2Item.getSlot()).findFirst().orElse(null);
 
             String[] actions = itemWidget != null && itemWidget.getActions() != null ?
                     itemWidget.getActions() :

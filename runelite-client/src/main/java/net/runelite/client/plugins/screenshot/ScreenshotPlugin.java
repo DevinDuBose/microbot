@@ -139,7 +139,8 @@ public class ScreenshotPlugin extends Plugin
 		TOA_ENTRY_MODE,
 		TOA,
 		TOA_EXPERT_MODE,
-		FORTIS_COLOSSEUM
+		FORTIS_COLOSSEUM,
+		TFA
 	}
 
 	private KillType killType;
@@ -420,6 +421,17 @@ public class ScreenshotPlugin extends Plugin
 			}
 		}
 
+		if (chatMessage.startsWith("Your completed Fractured Archive count is"))
+		{
+			Matcher m = NUMBER_PATTERN.matcher(Text.removeTags(chatMessage));
+			if (m.find())
+			{
+				killType = KillType.TFA;
+				killCountNumber = Integer.valueOf(m.group().replace(",", ""));
+				return;
+			}
+		}
+
 		if (chatMessage.startsWith("Your Lunar Chest count is"))
 		{
 			Matcher m = NUMBER_PATTERN.matcher(Text.removeTags(chatMessage));
@@ -557,6 +569,7 @@ public class ScreenshotPlugin extends Plugin
 			case InterfaceID.RAIDS_REWARDS:
 			case InterfaceID.TOB_CHESTS:
 			case InterfaceID.TOA_CHESTS:
+			case InterfaceID.TFA_CHESTS:
 			case InterfaceID.BARROWS_REWARD:
 			case InterfaceID.PMOON_REWARD:
 			case InterfaceID.COLOSSEUM_REWARD_CHEST_2:
@@ -670,6 +683,19 @@ public class ScreenshotPlugin extends Plugin
 				}
 
 				screenshotSubDir = SD_BOSS_KILLS;
+				killType = null;
+				killCountNumber = 0;
+				break;
+			}
+			case InterfaceID.TFA_CHESTS:
+			{
+				if (killType != KillType.TFA)
+				{
+					return;
+				}
+
+				screenshotSubDir = SD_BOSS_KILLS;
+				fileName = "The Fractured Archive(" + killCountNumber + ")";
 				killType = null;
 				killCountNumber = 0;
 				break;

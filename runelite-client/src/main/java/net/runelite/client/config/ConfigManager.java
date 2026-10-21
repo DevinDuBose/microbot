@@ -29,6 +29,7 @@ import com.google.common.base.MoreObjects;
 import com.google.common.base.Strings;
 import com.google.common.collect.ComparisonChain;
 import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
 import lombok.Getter;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
@@ -156,7 +157,7 @@ public class ConfigManager
 		// Ensure existing config is saved
 		sendConfig();
 
-		log.info("Switching profile to: {} ({})", newProfile.getName(), newProfile.getId());
+		log.info("Switching profile to: {}", newProfile.getId());
 
 		// sync the latest config revision from the server
 		if (sessionManager.getAccountSession() != null && newProfile.isSync())
@@ -277,7 +278,7 @@ public class ConfigManager
 
 			if (profile.isSync())
 			{
-				log.info("Active remote profile '{}' lost due to session close, converting to a local profile.", profile.getName());
+				log.info("Active remote profile {} lost due to session close, converting to a local profile.", profile.getId());
 				profile.setSync(false);
 				profile.setRev(-1L);
 			}
@@ -656,7 +657,7 @@ public class ConfigManager
 					continue;
 				}
 
-				log.info("Profile '{}' (sync: {}, active: {}, id: {})", p.getName(), p.isSync(), p.isActive(), p.getId());
+				log.info("Profile {} (sync: {}, active: {})", p.getId(), p.isSync(), p.isActive());
 			}
 
 			if (rsProfile == null)
@@ -728,7 +729,7 @@ public class ConfigManager
 
 			if (profile != null)
 			{
-				log.info("Using profile: {} ({})", profile.getName(), profile.getId());
+				log.info("Using profile: {}", profile.getId());
 			}
 			else
 			{
@@ -740,7 +741,7 @@ public class ConfigManager
 					profile.setActive(true);
 				}
 
-				log.info("Creating profile: {} ({})", profile.getName(), profile.getId());
+				log.info("Creating profile: {}", profile.getId());
 			}
 
 			// synced profautoogile need to be fetched if outdated
@@ -780,7 +781,7 @@ public class ConfigManager
 
 				if (migrating && remoteProfile.getId() == 0L)
 				{
-					log.info("Using remote profile {} as the active profile", profile.getName());
+					log.info("Using remote profile {} as the active profile", profile.getId());
 					profile.setActive(true);
 				}
 			}
@@ -803,7 +804,7 @@ public class ConfigManager
 					continue;
 				}
 
-				log.warn("Lost remote profile for '{}'", localProfile.getName());
+				log.warn("Lost remote profile for {}", localProfile.getId());
 				// convert the profile to a non-synced profile
 				localProfile.setSync(false);
 				localProfile.setRev(-1);
@@ -837,11 +838,11 @@ public class ConfigManager
 
 		if (profile.getRev() == remoteProfile.getRev())
 		{
-			log.info("Profile '{}' is up to date", profile.getName());
+			log.info("Profile {} is up to date", profile.getId());
 		}
 		else
 		{
-			log.info("Loading remote configuration for profile '{}'", profile.getName());
+			log.info("Loading remote configuration for profile {}", profile.getId());
 
 			try
 			{
@@ -1259,7 +1260,7 @@ public class ConfigManager
 			// null and the empty string are treated identically in sendConfig and treated as an unset
 			// If a config value defaults to "" and the current value is null, it will cause an extra
 			// unset to be sent, so treat them as equal
-			boolean isInventorySetup = item.keyName().toLowerCase().contains("inventorysetup");
+			boolean isInventorySetup = method.getReturnType() == InventorySetup.class;
 			if (Objects.equals(current, valueString) || (Strings.isNullOrEmpty(current) && Strings.isNullOrEmpty(valueString)))
 			{
 				if (isInventorySetup) {
@@ -1274,9 +1275,16 @@ public class ConfigManager
 			if (current != null && !current.isBlank()) {
 				if (isInventorySetup) {
 					var setups = configInventorySetupDataManager.loadV3Setups(this);
-					InventorySetup currentObj = gson.fromJson(current, InventorySetup.class);
+					InventorySetup currentObj;
+					try {
+						currentObj = gson.fromJson(current, InventorySetup.class);
+					} catch (JsonParseException | IllegalStateException e) {
+						log.debug("Unable to parse inventory setup for {}.{}", group.value(), item.keyName(), e);
+						currentObj = null;
+					}
+					String currentName = currentObj == null ? null : currentObj.getName();
 					if (!setups.isEmpty() && setups.stream()
-							.noneMatch(x -> x.getName().equalsIgnoreCase(currentObj.getName()))) {
+							.noneMatch(x -> x.getName().equalsIgnoreCase(currentName))) {
 						setConfiguration(group.value(), item.keyName(), "");
 					}
 				}
@@ -1517,7 +1525,7 @@ public class ConfigManager
 		ConfigProfile p = lock.findProfile(profile.getId());
 		if (p == null)
 		{
-			log.warn("Lost active profile {}!", profile.getName());
+			log.warn("Lost active profile {}!", profile.getId());
 
 			// We just recreate it, with the same id, so that the ConfigData stays valid
 			p = lock.createProfile(profile.getName(), profile.getId());

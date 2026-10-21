@@ -2397,6 +2397,7 @@ public class Rs2Bank {
 
     private static NearestBankRoute getPathAndBankToNearestBank(
             WorldPoint worldPoint, int maxObjectSearchRadius, Boolean useBankItems) {
+        if (worldPoint == null) return null;
         Microbot.log("Finding nearest bank...");
 
         Set<BankLocation> allBanks = Arrays.stream(BankLocation.values())
@@ -2550,19 +2551,24 @@ public class Rs2Bank {
 
     /**
      * Walks to a specified bank location with an option to toggle run energy.
-     * If the bank is already open, the method exits immediately.
+     * Returns false if bankLocation is null; otherwise exits immediately if the bank is already open.
      *
      * @param bankLocation the target bank location to walk to.
      * @param toggleRun    whether to toggle run energy during the walk.
      * @return true if the Rs2Player's location is within 4 tiles of the specified bank location.
      */
     public static boolean walkToBank(BankLocation bankLocation, boolean toggleRun) {
+        if (bankLocation == null) {
+            log.warn("Bank location is null, cannot walk to bank.");
+            return false;
+        }
         if (Rs2Bank.isOpen()) return true;
         Rs2Player.toggleRunEnergy(toggleRun);
         Microbot.status = "Walking to nearest bank " + bankLocation.toString();
         walkUntilBankReady(bankLocation);
-        return readyBankObject(bankLocation) != null
-                || bankLocation.getWorldPoint().distanceTo(Rs2Player.getWorldLocation()) <= 4;
+        if (readyBankObject(bankLocation) != null) return true;
+        WorldPoint playerLocation = Rs2Player.getWorldLocation();
+        return playerLocation != null && bankLocation.getWorldPoint().distanceTo(playerLocation) <= 4;
     }
 
     /**
@@ -2573,6 +2579,7 @@ public class Rs2Bank {
      */
     public static boolean isNearBank(int distance) {
         WorldPoint playerLocation = Rs2Player.getWorldLocation();
+        if (playerLocation == null) return false;
         return Arrays.stream(BankLocation.values())
                 .anyMatch(b -> b.getWorldPoint().getPlane() == playerLocation.getPlane()
                         && b.getWorldPoint().distanceTo2D(playerLocation) <= distance);
@@ -2586,8 +2593,9 @@ public class Rs2Bank {
      * @return true if Rs2Player location is less than distance away from the bank location
      */
     public static boolean isNearBank(BankLocation bankLocation, int distance) {
-        int distanceToBank = Rs2Walker.getDistanceBetween(Rs2Player.getWorldLocation(), bankLocation.getWorldPoint());
-        return distanceToBank <= distance;
+        WorldPoint playerLocation = Rs2Player.getWorldLocation();
+        if (playerLocation == null) return false;
+        return Rs2Walker.getDistanceBetween(playerLocation, bankLocation.getWorldPoint()) <= distance;
     }
 
     /**
@@ -2648,7 +2656,7 @@ public class Rs2Bank {
 
         final String[] DIGIT_INSTRUCTIONS = {"FIRST digit", "SECOND digit", "THIRD digit", "FOURTH digit"};
         if (pin == null || pin.length() != DIGIT_INSTRUCTIONS.length || !pin.matches("\\d+")) {
-            Microbot.log("Unable to enter bankpin with value " + pin);
+            Microbot.log("Unable to enter bankpin: configured pin is not a 4-digit number");
             return false;
         }
 
@@ -2921,7 +2929,7 @@ public class Rs2Bank {
             sleepUntil(()-> Rs2Widget.getWidget(983046) != null, Rs2Random.between(2000,5000));
             if(Rs2Widget.getWidget(983046) != null){
                 if(Rs2Widget.clickWidget(983046)){
-                    sleepUntil(()-> Rs2Widget.getWidget(15,11).getChildren()[0] == null, Rs2Random.between(500,1000));
+                    sleepUntil(Rs2Bank::isLootingBagViewEmpty, Rs2Random.between(500,1000));
                     if(Rs2Widget.clickWidget(983048)){ // close the bag
                         return true;
                     }
@@ -2932,6 +2940,15 @@ public class Rs2Bank {
         return false;
     }
 
+    static boolean isLootingBagViewEmpty() {
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            Widget items = Microbot.getClient().getWidget(15, 11);
+            if (items == null) return true;
+            Widget[] children = items.getChildren();
+            return children == null || children.length == 0 || children[0] == null;
+        }).orElse(true);
+    }
+
 
     /**
      * Withdraw items from the lootTrackerPlugin
@@ -2939,6 +2956,7 @@ public class Rs2Bank {
      * @param npcName the name of the npc
      * @return {@code true} if successfully withdrew loot items, otherwise {@code false}
      */
+    @Deprecated
     public static boolean withdrawLootItems(String npcName, List<String> itemsToNotSell) {
         boolean isAtGe = Rs2GrandExchange.walkToGrandExchange();
         if (isAtGe) {
@@ -3000,7 +3018,13 @@ public class Rs2Bank {
     public static int getBankItemCount() {
         Widget bank = getBankSizeWidget();
         if (bank == null) return 0;
-        return Integer.parseInt(bank.getText());
+        String text = bank.getText();
+        if (text == null) return 0;
+        try {
+            return Integer.parseInt(text.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /**
@@ -3323,7 +3347,7 @@ public class Rs2Bank {
         Widget w = Microbot.getClient().getWidget(BANK_ITEM_CONTAINER);
 
         // Check the height of the bank window to adjust scrolling if necessary
-        assert w != null;
+        if (w == null) return 0;
         int bankHeight = w.getHeight() / (BANK_ITEM_HEIGHT + BANK_ITEM_Y_PADDING);
 
         // Calculate the minimum scrollY to ensure the item is visible at the top of the window
@@ -3354,9 +3378,9 @@ public class Rs2Bank {
      * @param slotId the slot ID of the item to scroll to
      */
     public static boolean scrollBankToSlot(int slotId) {
-        int scrollY = calculateScrollYFromSlotId(slotId);
         Widget w = Microbot.getClient().getWidget(BANK_ITEM_CONTAINER);
         if (w == null) return false;
+        int scrollY = calculateScrollYFromSlotId(slotId);
 
         Microbot.getClientThread().invokeLater(() -> {
             Microbot.getClient().setVarcIntValue(VarClientInt.BANK_SCROLL, scrollY);

@@ -345,6 +345,7 @@ public class LootTrackerPlugin extends Plugin
 	private static final String CHAMBERS_OF_XERIC = "Chambers of Xeric";
 	private static final String THEATRE_OF_BLOOD = "Theatre of Blood";
 	private static final String TOMBS_OF_AMASCUT = "Tombs of Amascut";
+	private static final String THE_FRACTURED_ARCHIVE = "Fractured Archive";
 
 	private static final int FONT_OF_CONSUMPTION_REGION = 12106;
 	private static final String FONT_OF_CONSUMPTION_USE_MESSAGE = "You place the Unsired into the Font of Consumption...";
@@ -895,6 +896,16 @@ public class LootTrackerPlugin extends Plugin
 				metadata = new int[]{ raidLevel, teamSize, raidDamage };
 				chestLooted = true;
 				break;
+			case InterfaceID.TFA_CHESTS:
+				if (chestLooted)
+				{
+					return;
+				}
+
+				event = THE_FRACTURED_ARCHIVE;
+				container = client.getItemContainer(InventoryID.TFA_CHESTS);
+				chestLooted = true;
+				break;
 			case InterfaceID.MISC_COLLECTION:
 				event = "Kingdom of Miscellania";
 				container = client.getItemContainer(InventoryID.MISC_RESOURCES_COLLECTED);
@@ -940,7 +951,7 @@ public class LootTrackerPlugin extends Plugin
 
 		final Collection<ItemStack> items = toItemStacks(container);
 
-		if (config.showRaidsLootValue() && (event.equals(THEATRE_OF_BLOOD) || event.equals(CHAMBERS_OF_XERIC) || event.equals(TOMBS_OF_AMASCUT)))
+		if (config.showRaidsLootValue() && (event.equals(THEATRE_OF_BLOOD) || event.equals(CHAMBERS_OF_XERIC) || event.equals(TOMBS_OF_AMASCUT) || event.equals(THE_FRACTURED_ARCHIVE)))
 		{
 			long totalValue = items.stream()
 				.filter(item -> item.getId() > -1)
