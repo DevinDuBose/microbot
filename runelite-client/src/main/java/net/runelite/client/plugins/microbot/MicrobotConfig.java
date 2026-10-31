@@ -61,6 +61,19 @@ public interface MicrobotConfig extends Config
 		return true;
 	}
 
+	String keySpoofDeviceId = "spoofDeviceId";
+	@ConfigItem(
+		keyName = keySpoofDeviceId,
+		name = "Spoof device ID",
+		description = "Replace the hardware device ID and random.dat seed sent to the game server at login with random values cached per account",
+		position = 3,
+		section = generalSection
+	)
+	default boolean spoofDeviceId()
+	{
+		return true;
+	}
+
 	@ConfigSection(
 		name = "Movement",
 		description = "Movement and stamina settings. Plugins may override these, but any changes will be reflected here.",
@@ -273,6 +286,45 @@ public interface MicrobotConfig extends Config
 	default int inputIdleResumeMs()
 	{
 		return 1800;
+	}
+
+	String keyAlertLinkToken = "alertLinkToken";
+	@ConfigItem(
+		keyName = keyAlertLinkToken,
+		name = "Alert link token",
+		description = "Filled in by Link to Microbot account in the Microbot Cloud panel",
+		secret = true,
+		hidden = true
+	)
+	default String alertLinkToken()
+	{
+		return "";
+	}
+
+	String keyAllowDashboardScreenshots = "allowDashboardScreenshots";
+	@ConfigItem(
+		keyName = keyAllowDashboardScreenshots,
+		name = "Allow dashboard screenshots",
+		description = "Let the Microbot dashboard take a screenshot of the game when this client is linked to your account",
+		position = 10,
+		section = generalSection
+	)
+	default boolean allowDashboardScreenshots()
+	{
+		return true;
+	}
+
+	String keyAllowDashboardControl = "allowDashboardControl";
+	@ConfigItem(
+		keyName = keyAllowDashboardControl,
+		name = "Allow dashboard control",
+		description = "Let the Microbot dashboard stop your scripts or log this client out when it is linked to your account",
+		position = 11,
+		section = generalSection
+	)
+	default boolean allowDashboardControl()
+	{
+		return true;
 	}
 
 	@ConfigSection(

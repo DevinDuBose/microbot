@@ -3,6 +3,7 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.Script;
+import net.runelite.client.plugins.microbot.accountselector.TerminalLogoutHold;
 import net.runelite.client.plugins.microbot.util.antiban.Rs2AntibanSettings;
 import net.runelite.client.plugins.microbot.util.discord.Rs2Discord;
 import net.runelite.client.plugins.microbot.util.events.PluginPauseEvent;
@@ -13,6 +14,7 @@ import net.runelite.client.plugins.microbot.util.security.LoginManager;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.microbot.util.world.Rs2WorldUtil;
 import net.runelite.client.ui.ClientUI;
+import javax.inject.Inject;
 import javax.swing.SwingUtilities;
 import java.time.Duration;
 import java.time.Instant;
@@ -49,7 +51,11 @@ import net.runelite.api.GameState;
  */
 @Slf4j
 public class BreakHandlerScript extends Script {
-    public static String version = "2.1.0";
+    public static String version = "2.1.3";
+
+    @Inject
+    TerminalLogoutHold terminalLogoutHold = new TerminalLogoutHold();
+    private boolean holdingForManualLogin = false;
     
     // ban detection constants  
     private static final int BANNED_LOGIN_INDEX = 14;
@@ -61,6 +67,7 @@ public class BreakHandlerScript extends Script {
     
     // Constants for configuration and timing
     private static final int SCHEDULER_INTERVAL_MS = 1000;
+    private static final long TICK_STOP_TIMEOUT_MS = 2000;
     private static final int MINUTES_TO_SECONDS = 60;
     
     // Configuration-dependent timing values (accessed through helper methods)
@@ -122,6 +129,7 @@ public class BreakHandlerScript extends Script {
     // UI and configuration
     private String originalWindowTitle = "";
     private BreakHandlerConfig config;
+    private final BreakHandlerTickGuard tickGuard = new BreakHandlerTickGuard();
 
     // Track world state across breaks
     private int preBreakWorld = -1;
@@ -176,6 +184,9 @@ public class BreakHandlerScript extends Script {
      * Main entry point for the break handler script.
      */
     public boolean run(BreakHandlerConfig config) {
+        tickGuard.start();
+        BreakPreparation.finishBreak();
+        isBanned = false;
         this.config = config;        
         originalWindowTitle = ClientUI.getFrame().getTitle();        
         // Initialize state and timing
@@ -183,7 +194,7 @@ public class BreakHandlerScript extends Script {
         stateChangeTime.set(Instant.now());
         retryCount.set(0);        
         initializeNextBreakTimer();        
-        mainScheduledFuture = scheduledExecutorService.scheduleWithFixedDelay(() -> {
+        mainScheduledFuture = scheduledExecutorService.scheduleWithFixedDelay(() -> tickGuard.runTick(() -> {
             try {
                 super.run();
                 
@@ -198,7 +209,7 @@ public class BreakHandlerScript extends Script {
             } catch (Exception ex) {
                 log.error("Error in break handler main loop", ex);
             }
-        }, 0, SCHEDULER_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        }), 0, SCHEDULER_INTERVAL_MS, TimeUnit.MILLISECONDS);
         
         return true;
     }
@@ -307,6 +318,15 @@ public class BreakHandlerScript extends Script {
      * Break should start but waiting for safe conditions (not in combat/interacting).
      */
     private void handleBreakRequestedState() {
+        if (BreakPreparation.isAborted()) {
+            log.warn("Break preparation failed or timed out; skipping this break");
+            initializeNextBreakTimer();
+            transitionToState(BreakHandlerState.WAITING_FOR_BREAK);
+            return;
+        }
+        if (BreakPreparation.shouldDeferBreak()) {
+            return;
+        }
         // Check for timeout on waiting for safe conditions
         if (safeConditionWaitStartTime != null) {
             long waitTime = Duration.between(safeConditionWaitStartTime, Instant.now()).toMillis();
@@ -485,9 +505,20 @@ public class BreakHandlerScript extends Script {
         if (Microbot.isLoggedIn()) {
             log.debug("Already logged in, proceeding to break ending");
             loginWatchdogStartTime = null; // reset watchdog
+            holdingForManualLogin = false;
             transitionToState(BreakHandlerState.BREAK_ENDING);
             return;
         }
+
+        if (terminalLogoutHold.isActive()) {
+            if (!holdingForManualLogin) {
+                log.info("Not logging back in: the account was logged out on purpose. Log in by hand to continue.");
+                holdingForManualLogin = true;
+            }
+            loginWatchdogStartTime = null;
+            return;
+        }
+        holdingForManualLogin = false;
         
         // initialize login watchdog timer
         if (loginWatchdogStartTime == null) {
@@ -694,6 +725,9 @@ public class BreakHandlerScript extends Script {
      * This method is thread-safe and can be called from any thread.
      */
     private static void transitionToState(BreakHandlerState newState) {
+        if (newState == BreakHandlerState.WAITING_FOR_BREAK) {
+            BreakPreparation.finishBreak();
+        }
         BreakHandlerState oldState = currentState.get();
         if (oldState != newState) {
             log.debug("State transition: {} -> {}", oldState, newState);
@@ -844,6 +878,9 @@ public class BreakHandlerScript extends Script {
             String title = originalWindowTitle + " - " + breakType + ": " +
                            formatDuration(Duration.ofSeconds(Math.max(0, breakDuration)));
             SwingUtilities.invokeLater(() -> ClientUI.getFrame().setTitle(title));
+        } else if (state == BreakHandlerState.LOGIN_REQUESTED && holdingForManualLogin) {
+            String title = originalWindowTitle + " - Logged out on purpose";
+            SwingUtilities.invokeLater(() -> ClientUI.getFrame().setTitle(title));
         } else if (isBreakActive()) {
             String title = originalWindowTitle + " - " + state.toString().replace("_", " ");
             SwingUtilities.invokeLater(() -> ClientUI.getFrame().setTitle(title));
@@ -859,23 +896,22 @@ public class BreakHandlerScript extends Script {
 
     @Override
     public void shutdown() {
+        tickGuard.stop();
+        BreakPreparation.finishBreak();
         BreakHandlerState state = currentState.get();
         if(scheduledFuture != null && !scheduledFuture.isDone()) {
             scheduledFuture.cancel(true);
         }        
         log.info("Break handler shutting down. Current state: {}", state);
-        
-        // If we're in a break state, try to clean up gracefully
-        if (state == BreakHandlerState.LOGGED_OUT) {
-            log.info("Attempting to resume from logged out state");
-            transitionToState(BreakHandlerState.LOGIN_REQUESTED);
-        } else if (isBreakActive()) {
-            log.info("Attempting to end break gracefully");
-            transitionToState(BreakHandlerState.BREAK_ENDING);
-        }        
+        super.shutdown();
+        if (!tickGuard.awaitIdle(TICK_STOP_TIMEOUT_MS)) {
+            log.warn("Break handler loop still running after {}ms; resetting break state anyway", TICK_STOP_TIMEOUT_MS);
+        }
+
+        transitionToState(BreakHandlerState.WAITING_FOR_BREAK);
+        cleanupBreakState();
         resetWindowTitle();
         resumeFromBreak();
-        super.shutdown();
     }
 
     /**

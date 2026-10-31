@@ -354,7 +354,18 @@ public class ClientUI
 
 			if (OSType.getOSType() == OSType.MacOS)
 			{
-				OSXFullScreenAdapter.install(frame);
+				try
+				{
+					OSXFullScreenAdapter.install(frame);
+				}
+				catch (IllegalAccessError e)
+				{
+					// Only happens when launched without the eawt exports (e.g. an IDE run config).
+					// The adapter just syncs the extended state on fullscreen toggle.
+					log.warn("macOS fullscreen listener unavailable, add to the VM options: " +
+						"--add-exports=java.desktop/com.apple.eawt=ALL-UNNAMED " +
+						"--add-exports=java.desktop/com.apple.eawt.event=ALL-UNNAMED");
+				}
 			}
 
 			final Client apiClient = (Client) this.client;
@@ -659,11 +670,11 @@ public class ClientUI
 			questIconOff = net.runelite.client.plugins.microbot.questhelper.tools.Icon.QUEST_ICON_OFF.getImage();
 			questHelperNavBtn = toolbarPanel.add(
 				NavigationButton.builder()
-					.icon(configManager.getConfiguration(QuestHelperConfig.QUEST_HELPER_GROUP, "TurnOn", Boolean.class) ? questIconOn : questIconOff)
-					.tooltip(configManager.getConfiguration(QuestHelperConfig.QUEST_HELPER_GROUP, "TurnOn", Boolean.class) ? "Disable 'Semi-Auto' Questing" : "Enable 'Semi-Auto' Questing")
+					.icon(isQuestHelperEnabled() ? questIconOn : questIconOff)
+					.tooltip(isQuestHelperEnabled() ? "Disable 'Semi-Auto' Questing" : "Enable 'Semi-Auto' Questing")
 					.onClick(() ->
 					{
-						boolean isEnabled = configManager.getConfiguration(QuestHelperConfig.QUEST_HELPER_GROUP, "TurnOn", Boolean.class);
+						boolean isEnabled = isQuestHelperEnabled();
 						configManager.setConfiguration(QuestHelperConfig.QUEST_HELPER_GROUP, "TurnOn", !isEnabled);
 						questHelperNavBtn.setIcon(new ImageIcon(!isEnabled ? questIconOn : questIconOff ));
 						questHelperNavBtn.setToolTipText(!isEnabled ? "Disable 'Semi-Auto' Questing" : "Enable 'Semi-Auto' Questing");
@@ -1156,6 +1167,97 @@ public class ClientUI
 		pushHistory();
 	}
 
+	NavigationButton findSidebarNavigation(String tooltip)
+	{
+		return sidebarEntries.stream()
+			.filter(navBtn -> tooltip.equals(navBtn.getTooltip()))
+			.findFirst()
+			.orElse(null);
+	}
+
+	Rectangle getNavigationBounds(NavigationButton navBtn)
+	{
+		if (navBtn == null)
+		{
+			return null;
+		}
+		if (navBtn.getPanel() == null)
+		{
+			return toolbarPanel == null ? null : screenBounds(toolbarPanel.get(navBtn));
+		}
+		if (sidebar == null || !sidebar.isShowing() || !sidebarEntries.contains(navBtn))
+		{
+			return null;
+		}
+		int index = sidebarEntries.headSet(navBtn).size();
+		if (index >= sidebar.getTabCount())
+		{
+			return null;
+		}
+		Rectangle bounds = sidebar.getBoundsAt(index);
+		if (bounds == null || bounds.isEmpty())
+		{
+			return null;
+		}
+		Point origin = sidebar.getLocationOnScreen();
+		Rectangle result = new Rectangle(bounds);
+		result.translate(origin.x, origin.y);
+		return result;
+	}
+
+	Rectangle getSidebarBounds()
+	{
+		return sidebar == null ? null : screenBounds(sidebar);
+	}
+
+	Rectangle getSidebarTabsBounds()
+	{
+		if (sidebar == null || !sidebar.isShowing())
+		{
+			return null;
+		}
+		Rectangle union = null;
+		for (int i = 0; i < sidebar.getTabCount(); i++)
+		{
+			Rectangle bounds = sidebar.getBoundsAt(i);
+			if (bounds != null && !bounds.isEmpty())
+			{
+				union = union == null ? new Rectangle(bounds) : union.union(bounds);
+			}
+		}
+		if (union == null)
+		{
+			return null;
+		}
+		union = union.intersection(new Rectangle(0, 0, sidebar.getWidth(), sidebar.getHeight()));
+		if (union.isEmpty())
+		{
+			return null;
+		}
+		Point origin = sidebar.getLocationOnScreen();
+		union.translate(origin.x, origin.y);
+		return union;
+	}
+
+	boolean isSidebarOpen()
+	{
+		return sidebar != null && sidebar.isVisible();
+	}
+
+	boolean isPanelOpen(NavigationButton navBtn)
+	{
+		return isSidebarOpen() && navBtn != null && selectedTab == navBtn;
+	}
+
+	private static Rectangle screenBounds(Component component)
+	{
+		if (component == null || !component.isShowing())
+		{
+			return null;
+		}
+		return new Rectangle(component.getLocationOnScreen(), component.getSize());
+	}
+
 	private void toggleSidebar()
 	{
 		toggleSidebar(!sidebar.isVisible(), true);
@@ -1357,6 +1459,12 @@ public class ClientUI
 		{
 			client.requestFocusInWindow();
 		}
+	}
+
+	private boolean isQuestHelperEnabled()
+	{
+		// Unset until the QuestHelper config is first registered (fresh profile); its declared default is true
+		return !Boolean.FALSE.equals(configManager.getConfiguration(QuestHelperConfig.QUEST_HELPER_GROUP, "TurnOn", Boolean.class));
 	}
 
 	private void updateFrameConfig(boolean updateResizable)

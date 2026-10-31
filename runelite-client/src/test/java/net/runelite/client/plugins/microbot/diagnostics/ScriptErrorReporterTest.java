@@ -6,12 +6,14 @@ import ch.qos.logback.classic.spi.LoggingEvent;
 import com.google.gson.JsonObject;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
 import net.runelite.client.ClientSessionManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.microbot.MicrobotApi;
+import net.runelite.client.plugins.microbot.alerts.ClientAlertReporter;
 import net.runelite.client.plugins.microbot.externalplugins.MicrobotPluginManager;
 import net.runelite.client.util.ResetResistantAttachment;
 import static org.junit.Assert.assertEquals;
@@ -23,6 +25,7 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -39,6 +42,7 @@ public class ScriptErrorReporterTest
 	private final LoggerContext context = new LoggerContext();
 	private MicrobotApi api;
 	private ClientSessionManager sessions;
+	private ClientAlertReporter alerts;
 	private ScriptErrorReporter reporter;
 
 	@Before
@@ -46,6 +50,7 @@ public class ScriptErrorReporterTest
 	{
 		api = mock(MicrobotApi.class);
 		sessions = mock(ClientSessionManager.class);
+		alerts = mock(ClientAlertReporter.class);
 		when(sessions.getMicrobotSessionId()).thenReturn(UUID.fromString("00000000-0000-0000-0000-000000000001"));
 		MicrobotPluginManager pluginManager = mock(MicrobotPluginManager.class);
 		when(pluginManager.getInstalledPlugins()).thenReturn(List.of(new FakePlugin()));
@@ -55,7 +60,7 @@ public class ScriptErrorReporterTest
 
 	private ScriptErrorReporter reporter(MicrobotPluginManager pluginManager, boolean disableTelemetry)
 	{
-		ScriptErrorReporter reporter = new ScriptErrorReporter(api, pluginManager, mock(ScheduledExecutorService.class), sessions, disableTelemetry);
+		ScriptErrorReporter reporter = new ScriptErrorReporter(api, pluginManager, mock(ScheduledExecutorService.class), sessions, alerts, disableTelemetry);
 		reporter.setContext(context);
 		reporter.start();
 		return reporter;
@@ -98,6 +103,92 @@ public class ScriptErrorReporterTest
 		assertEquals("FakePlugin", first.get("plugin").getAsString());
 		assertEquals("1.2.3", first.get("pluginVersion").getAsString());
 		assertEquals(0, reporter.pendingCount());
+	}
+
+	@Test
+	public void recentErrorsListsTheChosenPluginsErrors()
+	{
+		for (int i = 0; i < 2; i++)
+		{
+			log(Level.ERROR, "loop failed", boom());
+		}
+		log(Level.ERROR, "walker broke", null);
+		reporter.flush();
+
+		String plugin = reporter.recentErrors("FakePlugin");
+		assertTrue(plugin, plugin.startsWith("2x FakePlugin: loop failed (java.lang.IllegalStateException: bank closed at [path])\n"));
+		assertTrue(plugin, plugin.contains("    at " + ScriptErrorReporterTest.class.getName() + ".boom:"));
+		assertTrue(plugin, plugin.endsWith("1x client: walker broke\n"));
+		String all = reporter.recentErrors(null);
+		assertTrue(all, all.contains("1x client: walker broke\n"));
+		assertTrue(all, all.contains("2x FakePlugin: loop failed"));
+		assertEquals("1x client: walker broke\n", reporter.recentErrors("OtherPlugin"));
+	}
+
+	@Test
+	public void namesOfOtherAccountsInTheLogAreFoundAndRemoved()
+	{
+		String log = "12:00 [AutoLogin] INFO Updated cached player name: Mule B\n"
+			+ "12:01 [BreakHandler] INFO Ban screen detected for player: MainC\n"
+			+ "12:02 [AutoLogin] INFO Login failure detected for player: Zezima - Invalid credentials\n"
+			+ "12:03 [Script] INFO trading with mule b and mainc\n"
+			+ "12:04 [Walker] INFO player=WorldPoint(x=3185) username: null\n";
+
+		assertEquals(Set.of("Mule B", "MainC", "Zezima"), ScriptErrorReporter.namesFoundIn(log));
+
+		String scrubbed = reporter.scrubLog(log, null);
+
+		assertFalse(scrubbed, scrubbed.toLowerCase().contains("mule"));
+		assertFalse(scrubbed, scrubbed.toLowerCase().contains("mainc"));
+		assertFalse(scrubbed, scrubbed.contains("Zezima"));
+		assertTrue(scrubbed, scrubbed.contains("for player: [player] - Invalid credentials"));
+		assertTrue(scrubbed, scrubbed.contains("player=WorldPoint(x=3185) username: null"));
+	}
+
+	@Test
+	public void scrubNamesOnlyReplacesWholeNames()
+	{
+		assertEquals("[player] banked, Bobby stayed", ScriptErrorReporter.scrubNames("Bob banked, Bobby stayed", Set.of("Bob")));
+		assertEquals("hi [player]", ScriptErrorReporter.scrubNames("hi Bob\u00A0Smith", Set.of("Bob Smith")));
+	}
+
+	@Test
+	public void everyNameSeenThisSessionIsRemovedFromErrors()
+	{
+		reporter.rememberPlayerName("MainAcc");
+		reporter.rememberPlayerName("MuleAcc");
+		log(Level.ERROR, "MainAcc gave items to MuleAcc", null);
+
+		String errors = reporter.recentErrors(null);
+
+		assertFalse(errors, errors.contains("MainAcc"));
+		assertFalse(errors, errors.contains("MuleAcc"));
+	}
+
+	@Test
+	public void recentErrorsAreKeptWhenTelemetryIsOff()
+	{
+		System.setProperty("microbot.disableTelemetry", "true");
+
+		log(Level.ERROR, "loop failed", boom());
+		reporter.flush();
+
+		assertEquals(0, reporter.pendingCount());
+		verify(api, never()).submitErrors(any(), any());
+		assertTrue(reporter.recentErrors("FakePlugin").startsWith("1x FakePlugin: loop failed"));
+	}
+
+	@Test
+	public void recentErrorsKeepOnlyTheNewestFingerprints()
+	{
+		for (int i = 0; i <= ScriptErrorReporter.MAX_RECENT_ERRORS; i++)
+		{
+			log(Level.ERROR, "failure " + (char) ('a' + i), null);
+		}
+
+		String all = reporter.recentErrors(null);
+		assertFalse(all, all.contains("failure a\n"));
+		assertTrue(all, all.contains("failure " + (char) ('a' + ScriptErrorReporter.MAX_RECENT_ERRORS) + "\n"));
 	}
 
 	@Test
@@ -145,6 +236,20 @@ public class ScriptErrorReporterTest
 		{
 			return e;
 		}
+	}
+
+	@Test
+	public void passesScrubbedErrorsToLinkedAlerts()
+	{
+		reporter.rememberPlayerName("Zezima");
+		log(Level.ERROR, "loop failed", boom());
+		verify(alerts, never()).onScriptError(any(), any(), any());
+
+		when(alerts.isActive()).thenReturn(true);
+		log(Level.ERROR, "Zezima could not bank", new IllegalStateException("Zezima is dead"));
+		ArgumentCaptor<String> message = ArgumentCaptor.forClass(String.class);
+		verify(alerts).onScriptError(eq("some.Script"), any(), message.capture());
+		assertEquals("[player] could not bank (IllegalStateException: [player] is dead)", message.getValue());
 	}
 
 	@Test
@@ -258,7 +363,7 @@ public class ScriptErrorReporterTest
 	public void installedReporterKeepsCollectingErrorsAfterLogbackReset()
 	{
 		ScheduledExecutorService executor = mock(ScheduledExecutorService.class);
-		ScriptErrorReporter installed = new ScriptErrorReporter(api, mock(MicrobotPluginManager.class), executor, sessions, false);
+		ScriptErrorReporter installed = new ScriptErrorReporter(api, mock(MicrobotPluginManager.class), executor, sessions, mock(ClientAlertReporter.class), false);
 		ResetResistantAttachment attachment = installed.install(context);
 
 		context.reset();
@@ -273,7 +378,7 @@ public class ScriptErrorReporterTest
 	@Test
 	public void reinstalledReporterCountsEachErrorOnceAfterLogbackReset()
 	{
-		ScriptErrorReporter installed = new ScriptErrorReporter(api, mock(MicrobotPluginManager.class), mock(ScheduledExecutorService.class), sessions, false);
+		ScriptErrorReporter installed = new ScriptErrorReporter(api, mock(MicrobotPluginManager.class), mock(ScheduledExecutorService.class), sessions, mock(ClientAlertReporter.class), false);
 		installed.install(context).remove();
 		installed.install(context);
 
@@ -289,7 +394,7 @@ public class ScriptErrorReporterTest
 	@Test
 	public void removedReporterIgnoresErrorsAfterLogbackReset()
 	{
-		ScriptErrorReporter installed = new ScriptErrorReporter(api, mock(MicrobotPluginManager.class), mock(ScheduledExecutorService.class), sessions, false);
+		ScriptErrorReporter installed = new ScriptErrorReporter(api, mock(MicrobotPluginManager.class), mock(ScheduledExecutorService.class), sessions, mock(ClientAlertReporter.class), false);
 		installed.install(context).remove();
 
 		context.reset();

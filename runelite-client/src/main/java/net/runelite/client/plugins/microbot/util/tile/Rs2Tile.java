@@ -13,12 +13,14 @@ import net.runelite.client.plugins.microbot.util.antiban.Rs2AntibanSettings;
 import net.runelite.client.plugins.microbot.util.coords.Rs2LocalPoint;
 import net.runelite.client.plugins.microbot.util.coords.Rs2WorldArea;
 import net.runelite.client.plugins.microbot.util.coords.Rs2WorldPoint;
-import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
+import net.runelite.client.plugins.microbot.api.tileobject.models.Rs2TileObjectModel;
+import net.runelite.client.plugins.microbot.api.tileobject.models.TileObjectType;
 import net.runelite.client.plugins.microbot.util.misc.Rs2UiHelper;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import org.intellij.lang.annotations.MagicConstant;
 
+import java.awt.Rectangle;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -761,6 +763,47 @@ public abstract class Rs2Tile implements Tile {
         return false;
     }
 
+    public static boolean isGameObjectInteractableFromReachableTile(GameObject gameObject) {
+        return runClientReadBoolean(() -> isGameObjectInteractableFromReachableTileInternal(gameObject));
+    }
+
+    private static boolean isGameObjectInteractableFromReachableTileInternal(GameObject gameObject) {
+        if (gameObject == null) return false;
+
+        final WorldView wv = Microbot.getClient().getTopLevelWorldView();
+        final Player player = Microbot.getClient().getLocalPlayer();
+        if (wv == null || player == null) return false;
+
+        final WorldView objectWv = gameObject.getWorldView();
+        final WorldView playerWv = player.getWorldView();
+        if (objectWv == null || playerWv == null || !objectWv.isTopLevel() || !playerWv.isTopLevel()) return false;
+        if (gameObject.getPlane() != wv.getPlane()) return false;
+
+        final Point sceneMin = gameObject.getSceneMinLocation();
+        final Point sceneMax = gameObject.getSceneMaxLocation();
+        final LocalPoint playerLocal = player.getLocalLocation();
+        if (sceneMin == null || sceneMax == null || playerLocal == null) return false;
+
+        if (CollisionMap.ignoreCollisionPacked.contains(WorldPointUtil.packWorldPoint(gameObject.getWorldLocation()))) return true;
+
+        final int[][] flags = getFlagsInternal();
+        if (flags == null) return false;
+
+        return canInteractWithFootprintFromReachableTile(flags,
+                reachableFrom(flags, playerLocal.getSceneX(), playerLocal.getSceneY()),
+                sceneMin.getX(), sceneMin.getY(), sceneMax.getX(), sceneMax.getY());
+    }
+
+    static boolean canInteractWithFootprintFromReachableTile(int[][] flags, boolean[][] reachable,
+                                                             int minX, int minY, int maxX, int maxY) {
+        for (int x = minX; x <= maxX; x++) {
+            for (int y = minY; y <= maxY; y++) {
+                if (canInteractFromReachableTile(flags, reachable, x, y, 0)) return true;
+            }
+        }
+        return false;
+    }
+
     private static boolean isBehindWallFace(int wallOrientation, int dx, int dy) {
         for (int[] edge : WALL_EDGES) {
             if ((wallOrientation & edge[0]) != 0 && edge[1] == -dx && edge[2] == -dy) return true;
@@ -1036,7 +1079,7 @@ public abstract class Rs2Tile implements Tile {
         }
 
         // Get the world area of the game object
-        Rs2WorldArea gameObjectArea = new Rs2WorldArea(Objects.requireNonNull(Rs2GameObject.getWorldArea(tileObject)));
+        Rs2WorldArea gameObjectArea = new Rs2WorldArea(Objects.requireNonNull(new Rs2TileObjectModel(tileObject).getWorldArea()));
 
         // Get interactable points around the game object
         List<WorldPoint> interactablePoints = getInteractablePoints(gameObjectArea, topLevelWorldView);
@@ -1122,7 +1165,11 @@ public abstract class Rs2Tile implements Tile {
     }
 
     private static boolean tileHasWallsInternal(WorldPoint source) {
-        return Rs2GameObject.getWallObjects().stream().filter(x -> x.getWorldLocation().equals(source)).findFirst().orElse(null) != null;
+        return Microbot.getRs2TileObjectCache().query()
+                .fromWorldView()
+                .ofType(TileObjectType.WALL)
+                .where(x -> Objects.equals(source, x.getRuneLiteWorldLocation()))
+                .first() != null;
     }
 
     /**
@@ -1143,12 +1190,12 @@ public abstract class Rs2Tile implements Tile {
     }
 
     private static boolean isBankBoothInternal(WorldPoint source) {
-        GameObject gameObject = Rs2GameObject.getGameObjects().stream().filter(x -> x.getWorldLocation().equals(source)).findFirst().orElse(null);
-        if (gameObject != null) {
-            ObjectComposition objectComposition = Rs2GameObject.convertToObjectComposition(gameObject);
-            return objectComposition != null && objectComposition.getName().equalsIgnoreCase("bank booth");
-        }
-        return false;
+        Rs2TileObjectModel gameObject = Microbot.getRs2TileObjectCache().query()
+                .fromWorldView()
+                .ofType(TileObjectType.GAME)
+                .where(x -> Objects.equals(source, x.getRuneLiteWorldLocation()))
+                .first();
+        return gameObject != null && "bank booth".equalsIgnoreCase(gameObject.getName());
     }
 
     /**
@@ -1231,6 +1278,9 @@ public abstract class Rs2Tile implements Tile {
     }
 
     private static List<Tile> fullPathToInternal(Tile source, Tile other) {
+        if (source == null || other == null) {
+            return null;
+        }
         int z = source.getPlane();
         if (z != other.getPlane()) {
             return null;
@@ -1461,6 +1511,10 @@ public abstract class Rs2Tile implements Tile {
     }
 
     private static List<Tile> pathToInternal(Tile source, Tile other) {
+        if (source == null || other == null)
+        {
+            return null;
+        }
         int z = source.getPlane();
         if (z != other.getPlane())
         {
@@ -1718,10 +1772,11 @@ public abstract class Rs2Tile implements Tile {
             return false;
         }
 
-        Point point = Rs2UiHelper.getClickingPoint(Rs2UiHelper.getTileClickbox(tile), true);
+        Rectangle clickbox = Rs2UiHelper.getTileClickbox(tile);
 
-        // If the point is 1,1 then the tile is not on screen and we should return false
-        if (point.getX() == 1 && point.getY() == 1) return false;
+        // A fallback clickbox means the tile is not on screen and we should return false
+        if (Rs2UiHelper.isFallbackRectangle(clickbox)) return false;
+        Point point = Rs2UiHelper.getClickingPoint(clickbox, true);
 
         Microbot.getNaturalMouse().moveTo(point.getX(), point.getY());
         return true;

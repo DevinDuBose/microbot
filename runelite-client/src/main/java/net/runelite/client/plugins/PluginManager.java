@@ -47,8 +47,6 @@ import net.runelite.client.events.ProfileChanged;
 import net.runelite.client.plugins.microbot.AlwaysOnPlugins;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.recovery.StartupRecovery;
-import net.runelite.client.task.Schedule;
-import net.runelite.client.task.ScheduledMethod;
 import net.runelite.client.task.Scheduler;
 import net.runelite.client.ui.SplashScreen;
 import net.runelite.client.util.GameEventManager;
@@ -61,9 +59,7 @@ import javax.inject.Singleton;
 import javax.swing.*;
 import java.io.File;
 import java.io.IOException;
-import java.lang.invoke.*;
 import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiConsumer;
@@ -421,7 +417,7 @@ public class PluginManager {
             }
 
             eventBus.register(plugin);
-            schedule(plugin);
+            scheduler.register(plugin);
             eventBus.post(new PluginChanged(plugin, true));
             if (external) {
                 StartupRecovery.pluginStarted(pluginName, descriptor.version());
@@ -453,7 +449,7 @@ public class PluginManager {
         }
 
         StartupRecovery.pluginStopped(plugin.getClass().getSimpleName());
-        unschedule(plugin);
+        scheduler.unregister(plugin);
         eventBus.unregister(plugin);
 
         try {
@@ -586,54 +582,6 @@ public class PluginManager {
 
     public Collection<Plugin> getPlugins() {
         return plugins;
-    }
-
-    private void schedule(Plugin plugin) {
-        for (Method method : plugin.getClass().getMethods()) {
-            Schedule schedule = method.getAnnotation(Schedule.class);
-
-            if (schedule == null) {
-                continue;
-            }
-
-            Runnable runnable = null;
-            try {
-                final Class<?> clazz = method.getDeclaringClass();
-                final MethodHandles.Lookup caller = ReflectUtil.privateLookupIn(clazz);
-                final MethodType subscription = MethodType.methodType(method.getReturnType(), method.getParameterTypes());
-                final MethodHandle target = caller.findVirtual(clazz, method.getName(), subscription);
-                final CallSite site = LambdaMetafactory.metafactory(
-                        caller,
-                        "run",
-                        MethodType.methodType(Runnable.class, clazz),
-                        subscription,
-                        target,
-                        subscription);
-
-                final MethodHandle factory = site.getTarget();
-                runnable = (Runnable) factory.bindTo(plugin).invokeExact();
-            } catch (Throwable e) {
-                log.warn("Unable to create lambda for method {}", method, e);
-            }
-
-            ScheduledMethod scheduledMethod = new ScheduledMethod(schedule, method, plugin, runnable);
-            log.debug("Scheduled task {}", scheduledMethod);
-
-            scheduler.addScheduledMethod(scheduledMethod);
-        }
-    }
-
-    private void unschedule(Plugin plugin) {
-        List<ScheduledMethod> methods = new ArrayList<>(scheduler.getScheduledMethods());
-
-        for (ScheduledMethod method : methods) {
-            if (method.getObject() != plugin) {
-                continue;
-            }
-
-            log.debug("Removing scheduled task {}", method);
-            scheduler.removeScheduledMethod(method);
-        }
     }
 
     /**

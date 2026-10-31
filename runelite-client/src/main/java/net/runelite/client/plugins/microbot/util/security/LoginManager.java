@@ -1,5 +1,7 @@
 package net.runelite.client.plugins.microbot.util.security;
 
+import com.google.inject.Key;
+import com.google.inject.name.Names;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -9,6 +11,9 @@ import net.runelite.client.config.ConfigProfile;
 import net.runelite.client.config.ProfileManager;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.util.keyboard.Rs2Keyboard;
+import net.runelite.client.rs.auth.Account;
+import net.runelite.client.rs.auth.JagexAuthService;
+import net.runelite.client.rs.auth.Session;
 import net.runelite.client.util.WorldUtil;
 import net.runelite.http.api.worlds.World;
 import net.runelite.http.api.worlds.WorldRegion;
@@ -27,6 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static net.runelite.client.plugins.microbot.util.Global.sleep;
+import static net.runelite.client.plugins.microbot.util.Global.sleepUntil;
 
 /**
  * Centralised login manager used by automation scripts, break handler and utility classes.
@@ -37,6 +43,7 @@ import static net.runelite.client.plugins.microbot.util.Global.sleep;
 public final class LoginManager {
 
 	private static final int MAX_PLAYER_COUNT = 1950;
+	private static final int WORLD_CHANGE_TIMEOUT_MS = 3000;
 	private static final Object LOGIN_LOCK = new Object();
 	private static final AtomicBoolean LOGIN_ATTEMPT_ACTIVE = new AtomicBoolean(false);
 	private static final AtomicReference<Instant> LAST_LOGIN_ATTEMPT = new AtomicReference<>(null);
@@ -214,9 +221,15 @@ public final class LoginManager {
 
         try {
             handleDisconnectDialogs(client);
-            trySetWorld(worldId);
+            if (!trySetWorld(client, worldId)) {
+                log.warn("Login aborted - could not select world {}", worldId);
+                return false;
+            }
+            boolean jagexAccount = selectAccount(client, username, encryptedPassword);
             triggerLoginScreen();
-            setCredentials(client, username, encryptedPassword);
+            if (!jagexAccount) {
+                setCredentials(client, username, encryptedPassword);
+            }
             submitLogin();
             handleBlockingDialogs(client);
             return true;
@@ -280,15 +293,101 @@ public final class LoginManager {
         sleep(600);
     }
 
-    private static void trySetWorld(int worldId) {
-        if (worldId <= 0) {
-            return;
+    private static boolean trySetWorld(Client client, int worldId) {
+        if (worldId <= 0 || isOnWorld(client, worldId)) {
+            return true;
         }
-        try {
-            setWorld(worldId);
-            sleep(600);
-        } catch (Exception e) {
-            log.warn("Changing world failed for {}", worldId, e);
+        if (!setWorld(worldId)) {
+            return false;
+        }
+        return isOnWorld(client, worldId) || sleepUntil(() -> isOnWorld(client, worldId), WORLD_CHANGE_TIMEOUT_MS);
+    }
+
+    private static boolean isOnWorld(Client client, int worldId) {
+        return Microbot.getClientThread()
+                .runOnClientThreadOptional(() -> client.getWorld() == worldId)
+                .orElse(false);
+    }
+
+    /**
+     * Puts the login screen in the mode the profile needs. If the active profile holds an imported
+     * Jagex Account session, or {@code username} matches a saved Jagex Account character, that
+     * character is selected. A profile without a password cannot log in as a legacy account, so a client
+     * launched with a Jagex Account keeps its launch character. Otherwise the active Jagex Account is
+     * cleared so the username and password fields can be filled in.
+     *
+     * @return true if a Jagex Account character was selected
+     */
+    private static boolean selectAccount(Client client, String username, String encryptedPassword) throws Exception {
+        ConfigProfile profile = Microbot.getConfigManager() != null ? getActiveProfile() : null;
+        if (profile != null && profile.getJagexSessionId() != null && username.equalsIgnoreCase(profile.getName())) {
+            log.debug("Switching to the profile's imported Jagex Account character");
+            switchJagexAccount(client, Encryption.decrypt(profile.getJagexSessionId()), profile.getJagexCharacterId(), profile.getName());
+            return true;
+        }
+        // getLauncherDisplayName() keeps the launch-time name after the account changes, so it does not show
+        // which account is selected now: select the launch character again
+        if (username.equalsIgnoreCase(client.getLauncherDisplayName()) || isLaunchProfile(client, profile, username)) {
+            JagexCredentials launch = JagexCredentials.fromLaunch();
+            if (launch != null) {
+                switchJagexAccount(client, launch.getSessionId(), launch.getCharacterId(), launch.getDisplayName());
+            }
+            return true;
+        }
+        JagexAuthService jagexAuthService = Microbot.getInjector().getInstance(JagexAuthService.class);
+        if (jagexAuthService.getSessions().isEmpty()) {
+            // Profile logins run on the shared single-thread executor, so loadFromStore().join() would deadlock
+            jagexAuthService.loadFromStoreNow();
+        }
+        for (Session session : jagexAuthService.getSessions()) {
+            Account[] accounts = jagexAuthService.getAccounts(session.getSessionId());
+            if (accounts == null) {
+                continue;
+            }
+            for (Account account : accounts) {
+                if (username.equalsIgnoreCase(account.getDisplayName())) {
+                    log.debug("Switching to the profile's Jagex Account character");
+                    switchJagexAccount(client, session.getSessionId(), Long.toString(account.getAccountId()), account.getDisplayName());
+                    return true;
+                }
+            }
+        }
+        if (client.getLauncherDisplayName() != null) {
+            if (encryptedPassword == null || encryptedPassword.isBlank()) {
+                JagexCredentials launch = JagexCredentials.fromLaunch();
+                if (launch != null && launch.getDisplayName().equalsIgnoreCase(client.getLauncherDisplayName())) {
+                    log.info("Profile {} has no password: logging in with the launch Jagex Account character {}", username, launch.getDisplayName());
+                    switchJagexAccount(client, launch.getSessionId(), launch.getCharacterId(), launch.getDisplayName());
+                    return true;
+                }
+            }
+            log.debug("Clearing the active Jagex Account for a legacy account login");
+            switchJagexAccount(client, null, null, null);
+        }
+        return false;
+    }
+
+    /**
+     * The launcher's "Play With Jagex Account" starts the client on a profile chosen for that character
+     * ({@code -profile=}), and the profile's name need not match the character's. Logging that profile in
+     * means the launch character, not a legacy login under the profile's name.
+     */
+    private static boolean isLaunchProfile(Client client, ConfigProfile profile, String username) {
+        if (profile == null || client.getLauncherDisplayName() == null || !username.equalsIgnoreCase(profile.getName())) {
+            return false;
+        }
+        String launchProfile = Microbot.getInjector().getInstance(Key.get(String.class, Names.named("profile")));
+        return profile.getName().equals(launchProfile);
+    }
+
+    private static void switchJagexAccount(Client client, String sessionId, String characterId, String displayName) {
+        // Waits for the switch to finish. getLauncherDisplayName() keeps the launch-time name, so it cannot confirm it.
+        boolean switched = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            client.switchJagexAccount(sessionId, characterId, displayName);
+            return true;
+        }).orElse(false);
+        if (!switched) {
+            throw new IllegalStateException("The client thread did not switch the Jagex Account");
         }
     }
 
@@ -498,38 +597,49 @@ public final class LoginManager {
         return isMemberWorld(client.getWorld());
     }
 
-    public static void setWorld(int worldNumber) {
+    public static boolean setWorld(int worldNumber) {
         try {
             if (Microbot.getWorldService() == null || Microbot.getClient() == null) {
                 log.warn("Cannot change world - client or world service unavailable");
-                return;
+                return false;
             }
             WorldResult worldResult = Microbot.getWorldService().getWorlds();
             if (worldResult == null) {
                 log.warn("Cannot change world - world service returned no data");
-                return;
+                return false;
             }
             net.runelite.http.api.worlds.World world = worldResult.findWorld(worldNumber);
             if (world == null) {
                 log.warn("Failed to find world {}", worldNumber);
-                return;
+                return false;
             }
-            final net.runelite.api.World rsWorld = Microbot.getClient().createWorld();
-            if (rsWorld == null) {
-                log.warn("Failed to create world instance for {}", worldNumber);
-                return;
+            boolean changed = Microbot.getClientThread()
+                    .runOnClientThreadOptional(() -> changeWorld(Microbot.getClient(), world))
+                    .orElse(false);
+            if (!changed) {
+                log.warn("Failed to change to world {}", worldNumber);
             }
-            rsWorld.setActivity(world.getActivity());
-            rsWorld.setAddress(world.getAddress());
-            rsWorld.setId(world.getId());
-            rsWorld.setPlayerCount(world.getPlayers());
-            if (world.getRegion() != null) {
-                rsWorld.setLocation(world.getRegion().getId());
-            }
-            rsWorld.setTypes(WorldUtil.toWorldTypes(world.getTypes()));
-            Microbot.getClient().changeWorld(rsWorld);
+            return changed;
         } catch (Exception ex) {
             log.warn("Failed to set target world {}", worldNumber, ex);
+            return false;
         }
+    }
+
+    private static boolean changeWorld(Client client, net.runelite.http.api.worlds.World world) {
+        final net.runelite.api.World rsWorld = client.createWorld();
+        if (rsWorld == null) {
+            return false;
+        }
+        rsWorld.setActivity(world.getActivity());
+        rsWorld.setAddress(world.getAddress());
+        rsWorld.setId(world.getId());
+        rsWorld.setPlayerCount(world.getPlayers());
+        if (world.getRegion() != null) {
+            rsWorld.setLocation(world.getRegion().getId());
+        }
+        rsWorld.setTypes(WorldUtil.toWorldTypes(world.getTypes()));
+        client.changeWorld(rsWorld);
+        return true;
     }
 }

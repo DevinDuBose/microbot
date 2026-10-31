@@ -11,6 +11,7 @@ import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.security.LoginManager;
+import net.runelite.client.plugins.microbot.util.security.MembershipRecorder;
 import net.runelite.client.plugins.microbot.util.shop.Rs2Shop;
 import net.runelite.client.plugins.worldhopper.ping.Ping;
 import java.util.Collections;
@@ -75,14 +76,13 @@ public class Rs2WorldUtil {
             ConfigProfile activeProfile = LoginManager.getActiveProfile();            
             if(!Microbot.isLoggedIn() ){
                 if(activeProfile != null){                    
-                    return isWorldAccessible(targetWorld, isMemberAccount, false);
+                    return isAccessibleFromClientWorld(targetWorld, isMemberAccount);
                 }
                 log.warn("Cannot determine world accessibility - not logged in and no active profile");
                 return false;// Cannot determine accessibility if not logged in and no profile
             }
             if(Microbot.getClient() != null &&  Microbot.getClient().getLocalPlayer() != null){                
-                boolean isInSeasonalWorld = Microbot.getClient().getWorldType().contains(net.runelite.api.WorldType.SEASONAL);
-                return isWorldAccessible(targetWorld, isMemberAccount, isInSeasonalWorld);                
+                return isAccessibleFromClientWorld(targetWorld, isMemberAccount);
             }
             log.warn("Cannot determine world accessibility - client or local player is null");
             return false;                                    
@@ -92,6 +92,28 @@ public class Rs2WorldUtil {
             return false;
         }
     }
+    private static boolean isAccessibleFromClientWorld(World targetWorld, boolean isMemberAccount) {
+        java.util.Optional<Boolean> isInSeasonalWorld = readClientOnSeasonalWorld();
+        if (!isInSeasonalWorld.isPresent()) {
+            log.warn("Cannot determine accessibility of world {} - client world type could not be read", targetWorld.getId());
+            return false;
+        }
+        return isWorldAccessible(targetWorld, isMemberAccount, isInSeasonalWorld.get());
+    }
+
+    private static java.util.Optional<Boolean> readClientOnSeasonalWorld() {
+        if (Microbot.getClient() == null) {
+            return java.util.Optional.of(false);
+        }
+        if (Microbot.getClientThread() == null) {
+            return java.util.Optional.empty();
+        }
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            java.util.EnumSet<net.runelite.api.WorldType> worldTypes = Microbot.getClient().getWorldType();
+            return worldTypes != null && worldTypes.contains(net.runelite.api.WorldType.SEASONAL);
+        });
+    }
+
     public static boolean isMemberAccount(){
         ConfigProfile activeProfile = LoginManager.getActiveProfile();
          // try to get membership status from cached varplayer data
@@ -113,8 +135,7 @@ public class Rs2WorldUtil {
         }
         if(!Microbot.isLoggedIn() ){
             if(activeProfile != null){
-                boolean isPlayerMember = activeProfile.isMember();
-                return isPlayerMember;
+                return MembershipRecorder.isMember(activeProfile, System.currentTimeMillis());
             }                                               
             log.warn("Cannot determine membership status - not logged in, no active profile, and no cached data available");
             return false;
@@ -130,45 +151,7 @@ public class Rs2WorldUtil {
      * @return true if cache loading was successful and membership data is still valid, false otherwise
      */
     private static int getPorfileMemberShipDays() {
-        try {
-          
-            ConfigProfile activeProfile = LoginManager.getActiveProfile();
-            long memberExpireDays = activeProfile != null ? activeProfile.getMemberExpireDays() : 0;
-            long memberExpireDaysTimeStemp = activeProfile != null ? activeProfile.getMemberExpireDaysTimeStemp() : 0;
-            if( memberExpireDays == 0 && memberExpireDaysTimeStemp == 0){
-                log.warn("No membership expiry data set in profile (memberExpireDays: {}, memberExpireDaysTimeStemp: {})", 
-                memberExpireDays, memberExpireDaysTimeStemp);
-                return -1;
-            }            
-           
-            // calculate days since cache was saved
-            long currentTime = System.currentTimeMillis();
-            log.info("Checking membership expiry for profile (memberExpireDays: {}, memberExpireDaysTimeStemp: {}, currentTime: {})", 
-                memberExpireDays, memberExpireDaysTimeStemp, currentTime);
-            long daysSinceCached = (currentTime - memberExpireDaysTimeStemp) / (24 * 60 * 60 * 1000);
-                        
-            if( daysSinceCached > memberExpireDays){
-                log.info("Membership expired since date - member expire days: {}, days passed: {}", 
-                    memberExpireDays, daysSinceCached);
-                return 0;
-            }
-            // calculate remaining membership days accounting for time passed
-            long remainingDays = (long)memberExpireDays - (long)daysSinceCached;
-            
-            if (remainingDays <= 0) {
-                log.info("Membership expired since date - member expire {}, days passed: {}", 
-                    memberExpireDays, daysSinceCached);
-                return 0;
-            }
-            
-            log.info("Valid membership found  - {} days remaining (last days membership expries: {}, days passed: {})", 
-                remainingDays, memberExpireDays, daysSinceCached);
-            return (int)remainingDays;
-            
-        } catch (Exception e) {
-            log.info("Error attempting to load membership status: {}", e.getMessage());
-            return -1;
-        }
+        return (int) MembershipRecorder.remainingDays(LoginManager.getActiveProfile(), System.currentTimeMillis());
     }
     /**
      * Determines if a specific world is accessible based on player membership status,

@@ -14,6 +14,8 @@ public final class DiagnosticReport
 	private static final Pattern URL_CREDENTIALS = Pattern.compile("(?i)([a-z][a-z0-9+.-]*://)[^\\s/@]+@");
 	private static final Pattern EMAIL = Pattern.compile("[\\w.+-]+@[\\w-]+(?:\\.[\\w-]+)+");
 	private static final Pattern SECRET = Pattern.compile("[A-Za-z0-9_\\-+/=]{32,}");
+	private static final Pattern KEYED_SECRET = Pattern.compile(
+		"(?i)\\b(password|passwd|passphrase|token|api[_-]?key|secret|authorization|bank ?pin|pin)(\\s*[:=]\\s*)[^\\s,;)]+");
 
 	private DiagnosticReport()
 	{
@@ -98,18 +100,24 @@ public final class DiagnosticReport
 		{
 			return "";
 		}
+		String text = redact(raw).replaceAll("\\s+", " ").trim();
+		if (text.length() > MAX_VALUE_LENGTH)
+		{
+			text = text.substring(0, MAX_VALUE_LENGTH - 3) + "...";
+		}
+		return text;
+	}
+
+	static String redact(String raw)
+	{
 		String text = HTML_TAG.matcher(raw).replaceAll(" ");
 		text = CONTROL.matcher(text).replaceAll(" ");
 		text = URL_CREDENTIALS.matcher(text).replaceAll("$1[redacted]@");
 		text = WINDOWS_PATH.matcher(text).replaceAll("[path]");
 		text = UNIX_PATH.matcher(text).replaceAll("[path]");
 		text = EMAIL.matcher(text).replaceAll("[redacted]");
+		text = KEYED_SECRET.matcher(text).replaceAll("$1$2[redacted]");
 		text = SECRET.matcher(text).replaceAll("[redacted]");
-		text = text.replaceAll("\\s+", " ").trim();
-		if (text.length() > MAX_VALUE_LENGTH)
-		{
-			text = text.substring(0, MAX_VALUE_LENGTH - 3) + "...";
-		}
 		return text;
 	}
 

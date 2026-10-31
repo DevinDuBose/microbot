@@ -409,7 +409,13 @@ public class Microbot {
             if (Microbot.getClient().getWorld() == worldNumber) {
                 return true;
             }
-            World newWorld = Microbot.getWorldService().getWorlds().findWorld(worldNumber);
+            WorldService service = Microbot.getWorldService();
+            net.runelite.http.api.worlds.WorldResult worlds = service == null ? null : service.getWorlds();
+            if (worlds == null) {
+                log.error("World list not loaded, cannot hop to world {}", worldNumber);
+                return false;
+            }
+            World newWorld = worlds.findWorld(worldNumber);
             if (newWorld == null) {
                 Microbot.getNotifier().notify("Invalid World");
                 System.out.println("Tried to hop to an invalid world");
@@ -761,11 +767,20 @@ public class Microbot {
     }
 
     public static void doInvoke(NewMenuEntry entry, Rectangle rectangle) {
+        doInvoke(entry, rectangle, false);
+    }
+
+    public static void doInvokeQuick(NewMenuEntry entry, Rectangle rectangle) {
+        doInvoke(entry, rectangle, true);
+    }
+
+    private static void doInvoke(NewMenuEntry entry, Rectangle rectangle, boolean quick) {
         try {
-            if (Rs2UiHelper.isRectangleWithinCanvas(rectangle)) {
-                click(rectangle, entry);
+            Rectangle visible = Rs2UiHelper.isFallbackRectangle(rectangle) ? null : Rs2UiHelper.clipToCanvas(rectangle);
+            if (visible == null) {
+                click(new Rectangle(1, 1), entry, true, quick);
             } else {
-                click(new Rectangle(1, 1), entry);
+                click(visible, entry, false, quick);
             }
         } catch (ArrayIndexOutOfBoundsException ex) {
             log.error("Error during doInvoke", ex);
@@ -789,10 +804,16 @@ public class Microbot {
     }
 
     public static void click(Rectangle rectangle, NewMenuEntry entry) {
-        if (entry.getType() == MenuAction.WALK) {
-            mouse.click(new Point(entry.getParam0(), entry.getParam1()), entry);
+        click(rectangle, entry, true, false);
+    }
+
+    private static void click(Rectangle rectangle, NewMenuEntry entry, boolean resolveFallback, boolean quick) {
+        Point point = entry.getType() == MenuAction.WALK
+                ? new Point(entry.getParam0(), entry.getParam1())
+                : Rs2UiHelper.getClickingPoint(rectangle, true, resolveFallback);
+        if (quick) {
+            mouse.quickClick(point, entry);
         } else {
-            Point point = Rs2UiHelper.getClickingPoint(rectangle, true);
             mouse.click(point, entry);
         }
 
@@ -802,6 +823,9 @@ public class Microbot {
     }
 
     public static void click(Rectangle rectangle) {
+        if (Rs2UiHelper.isFallbackRectangle(rectangle)) {
+            return;
+        }
 
         Point point = Rs2UiHelper.getClickingPoint(rectangle, true);
         mouse.click(point);
@@ -925,8 +949,22 @@ public class Microbot {
      */
     public static void openPopUp(String title, String description) {
         getClientThread().invoke(() -> {
-            // Open a modal interface with the specified widget ID and modal mode
-            WidgetNode widgetNode = getClient().openInterface((161 << 16) | 13, 660, WidgetModalMode.MODAL_CLICKTHROUGH);
+            Client c = getClient();
+            if (c.getGameState() != GameState.LOGGED_IN) {
+                return;
+            }
+            int container = popUpContainer(c.getTopLevelInterfaceId());
+            if (container == -1 || c.getWidget(container) == null) {
+                return;
+            }
+
+            WidgetNode widgetNode;
+            try {
+                widgetNode = c.openInterface(container, InterfaceID.NOTIFICATION_DISPLAY, WidgetModalMode.MODAL_CLICKTHROUGH);
+            } catch (IllegalStateException ex) {
+                log.debug("Unable to open pop-up on component {}", container, ex);
+                return;
+            }
 
             // Run a client script to populate the interface with the title and description
             getClient().runScript(3343, title, description, -1);
@@ -943,6 +981,19 @@ public class Microbot {
                 return true;
             });
         });
+    }
+
+    static int popUpContainer(int topLevelInterfaceId) {
+        switch (topLevelInterfaceId) {
+            case InterfaceID.TOPLEVEL:
+                return InterfaceID.Toplevel.NOTIFICATIONS;
+            case InterfaceID.TOPLEVEL_OSRS_STRETCH:
+                return InterfaceID.ToplevelOsrsStretch.NOTIFICATIONS;
+            case InterfaceID.TOPLEVEL_PRE_EOC:
+                return InterfaceID.ToplevelPreEoc.NOTIFICATIONS;
+            default:
+                return -1;
+        }
     }
 
     public static boolean isPluginEnabled(Plugin plugin) {

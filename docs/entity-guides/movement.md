@@ -548,3 +548,88 @@ Polygon poly = Perspective.getCanvasTilePoly(client, localPoint);
 **Where this applies:** `Rs2Camera.isTileOnScreen(LocalPoint)`, `Rs2Camera.isTileOnScreen(TileObject)`, and any helper that projects an entity's local point to the canvas.
 
 **Defensive check:** Mock a worldview whose `getTileHeight` throws and assert out-of-scene points return false without calling it, as in `Rs2CameraTileOnScreenTest`.
+
+## 28. A door attempt that ends on the near side is a refusal, not a traversal
+
+Judge a door crossing by the edge's own axis (`Rs2DoorGeometry.crossedDoorAxis`), not by whether the player changed side relative to the door object's tile. A wall door usually sits on the near-side tile of its edge, so walking onto that tile, or onto its row or column, flips the object-relative reading while the player is still in front of the door. Count a cross-nudge that leaves the player stationary on the near-side tile as a refusal too. Keep the walk-scoped strike-out blocks with the outermost walk: a can't-reach recovery walk nested inside it is not a new walk session.
+
+**Why this matters:** During Misthalin Mystery auto-play the route went through locked door 30117. Each open click was read as a traversal because the player stepped from (1634,4839) to (1633,4838), level with the door at (1633,4837). That verdict wiped the door's strikes and hid it as recently opened, the follow-up nudge moved the player onto the near-side tile and was not counted, and `door_recovery_suppressed | reason=nearby-route-door` kept the walk waiting for handlers that would never strike the door out. The strike-outs that did land were lifted again by the nested can't-reach recovery walk the next door click started. The walker looped for about 11 minutes.
+
+**Pattern to follow:**
+
+```java
+// Wrong: object-relative side flip counts the approach as a crossing.
+return movedAcrossInteractedObject(start, end, doorTile) && end.distanceTo2D(toWp) < start.distanceTo2D(toWp);
+
+// Right: on a cardinal edge the player must be at or beyond the far side.
+if (isCardinalEdge(fromWp, toWp) && !Rs2DoorGeometry.crossedDoorAxis(fromWp, toWp, end)) return false;
+```
+
+**Where this applies:** `Rs2WalkerDoors.didTraverseInteractedDoor`, `Rs2WalkerDoors.tryDoorEdgeCrossNudge`, `Rs2Walker.withdrawPreviousWalkScopedBlocks`, and any door verdict that feeds `DoorAttemptLedger` strikes.
+
+**Defensive check:** Replay the loop as pure verdicts against a `DoorAttemptLedger` and assert the edge strikes out within `DOOR_CROSS_FAILURE_STRIKE_LIMIT` cycles, as in `LockedDoorStrikeOutTest`.
+
+## 29. Null-check a scene `Tile` before pathing from or to it
+
+A slot in `scene.getTiles()[plane][x][y]` can be `null` even when the `LocalPoint` for that position resolved, for example an empty tile or a slot that has not been filled yet after a region change. `Rs2Tile.pathTo` and `Rs2Tile.fullPathTo` treat a missing endpoint as "no path", and callers that read a tile from the scene array must do the same before using it.
+
+**Why this matters:** `Rs2WorldPoint.pathTo` passed the scene tile straight into `Rs2Tile.fullPathTo`, which called `source.getPlane()`. Telemetry for 2.6.38 recorded a `NullPointerException` from `Rs2GameObject.canReach`, which threw instead of returning `false`.
+
+**Pattern to follow:**
+
+```java
+// Wrong: the scene slot may be empty.
+Tile sourceTile = tiles[plane][x][y];
+return Rs2Tile.fullPathTo(sourceTile, targetTile);
+
+// Right: no tile means no path.
+Tile sourceTile = tiles[plane][x][y];
+if (sourceTile == null || targetTile == null) return null;
+return Rs2Tile.fullPathTo(sourceTile, targetTile);
+```
+
+**Where this applies:** `Rs2WorldPoint.pathTo`, `Rs2Tile.pathTo`, `Rs2Tile.fullPathTo`, and any helper that reads a `Tile` from the scene array.
+
+**Defensive check:** Mock a scene with an empty source or target slot and assert the path is `null`, as in `Rs2WorldPointNullSceneTileTest` and `Rs2TileNullPathEndpointTest`.
+
+## 30. In resizable mode the viewport runs under the side panel, chatbox and minimap
+
+`client.getViewportXOffset/YOffset/Width/Height` covers the whole canvas in the resizable layouts, so a tile that projects inside the viewport can still be drawn under the inventory/side panel, the chatbox or the minimap. A `WALK` menu entry clicks `param0/param1` exactly, so a scene click point under one of those interfaces lands on the interface. Reject scene click points whose click box intersects a visible top-level overlay container and let the caller use the minimap instead.
+
+**Why this matters:** A Discord report on a clean main build showed the walker clicking the inventory while walking. `Rs2WalkerMovement.sceneCanvasPoint` and `Rs2Camera.isTileOnScreen` only tested the viewport rectangle, so `dispatchSceneWalk` clicked a tile point behind the side panel.
+
+**Pattern to follow:**
+
+```java
+// Wrong: viewport bounds alone in resizable mode.
+return isCanvasPointInsideViewport(canvasPoint, viewport) ? canvasPoint : null;
+
+// Right: also reject points covered by a visible side panel, chatbox or minimap container.
+if (!isCanvasPointInsideViewport(canvasPoint, viewport)
+        || isCanvasPointCoveredByInterface(canvasPoint, visibleSceneOverlayBounds())) return null;
+```
+
+**Where this applies:** `Rs2WalkerMovement.sceneCanvasPoint`, `Rs2WalkerMovement.isSceneCanvasClickable`, `Rs2WalkerMovement.dispatchSceneWalk`, and any helper that clicks a projected canvas point with a `WALK` entry.
+
+**Defensive check:** Assert points inside, touching and outside overlay rectangles against `isCanvasPointCoveredByInterface`, as in `Rs2WalkerUnitTest.sceneClickRejectsPointsCoveredByVisibleInterfaces`.
+
+## 31. The player location can be `null` right after a transport
+
+`Rs2Player.getWorldLocation()` returns `null` while the local player is missing, which happens while the destination area loads after a teleport, ladder or region-crossing door. Location-derived predicates such as `Rs2Player.isInCave()` must answer `false` for a missing location instead of dereferencing it.
+
+**Why this matters:** `Rs2WalkerTransports.finishHandledTransport` restarts pathfinding immediately after a transport, and `Rs2WalkerLifecycleRuntime.restartPathfinding` passes `Rs2Player.isInCave()` to the route request. Telemetry for 2.6.43 recorded a `NullPointerException` from `isInCave` that aborted the walk after the transport had already succeeded.
+
+**Pattern to follow:**
+
+```java
+// Wrong: the location is null while the new area loads.
+return Rs2Player.getWorldLocation().getY() >= 6400;
+
+// Right: no location means no cave.
+WorldPoint location = Rs2Player.getWorldLocation();
+return location != null && location.getY() >= 6400;
+```
+
+**Where this applies:** `Rs2Player.isInCave` and any helper that reads `Rs2Player.getWorldLocation()` during a walk or transport handoff.
+
+**Defensive check:** Mock `Rs2PlayerStateCache.getLocalPlayerPosition()` to return `null` and assert the predicate is `false`, as in `Rs2PlayerIsInCaveTest`.

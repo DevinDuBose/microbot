@@ -14,7 +14,6 @@ import net.runelite.api.gameval.ItemID;
 import net.runelite.api.gameval.NpcID;
 import net.runelite.api.gameval.ObjectID;
 import net.runelite.api.widgets.ComponentID;
-import net.runelite.api.widgets.Widget;
 import net.runelite.client.plugins.devtools.MovementFlag;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
@@ -27,7 +26,7 @@ import net.runelite.client.plugins.microbot.util.coords.Rs2WorldArea;
 import net.runelite.client.plugins.microbot.util.coords.Rs2WorldPoint;
 import net.runelite.client.plugins.microbot.util.dialogues.Rs2Dialogue;
 import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
-import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
+import net.runelite.client.plugins.microbot.api.tileobject.models.TileObjectType;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.plugins.microbot.util.keyboard.Rs2Keyboard;
@@ -125,7 +124,6 @@ final class Rs2WalkerMovement {
     static final SceneClickPolicy SCENE_CLICKS = SceneClickPolicy.create();
     static final int SCENE_WALK_CONFIRM_TIMEOUT_MS = 600;
     static final int SCENE_WALK_CONFIRM_POLL_MS = 25;
-
     private Rs2WalkerMovement() {
     }
 
@@ -753,8 +751,12 @@ final class Rs2WalkerMovement {
         }
         int end = Math.min(rawPath.size(), anchor + sceneReach + 1);
         List<TileObject> sceneObjects = new ArrayList<>();
-        sceneObjects.addAll(Rs2GameObject.getWallObjects(o -> true, playerLoc, sceneReach));
-        sceneObjects.addAll(Rs2GameObject.getGameObjects(o -> true, playerLoc, sceneReach));
+        Microbot.getRs2TileObjectCache().query()
+                .fromWorldView()
+                .ofType(TileObjectType.WALL, TileObjectType.GAME)
+                .within(playerLoc, sceneReach)
+                .toListOnClientThread()
+                .forEach(object -> sceneObjects.add(object.getTileObject()));
         for (int i = anchor; i < end - 1; i++) {
             WorldPoint from = rawPath.get(i);
             WorldPoint to = rawPath.get(i + 1);
@@ -892,7 +894,11 @@ final class Rs2WalkerMovement {
         if (worldPoint == null || SCENE_CLICKS.isSuppressed(System.currentTimeMillis())) {
             return false;
         }
-        Rs2Player.toggleRunEnergy(toggleRun);
+        if (toggleRun) {
+            requestAutoRun();
+        } else {
+            Rs2Player.toggleRunEnergy(false);
+        }
         if (!dispatchSceneWalk(worldPoint)) {
             return false;
         }
@@ -982,11 +988,28 @@ final class Rs2WalkerMovement {
         Rectangle viewport = new Rectangle(Microbot.getClient().getViewportXOffset(),
                 Microbot.getClient().getViewportYOffset(), Microbot.getClient().getViewportWidth(),
                 Microbot.getClient().getViewportHeight());
-        return isCanvasPointInsideViewport(canvasPoint, viewport) ? canvasPoint : null;
+        if (!isCanvasPointInsideViewport(canvasPoint, viewport)
+                || isCanvasPointCoveredByInterface(canvasPoint, Rs2UiHelper.visibleSceneOverlayBounds())) {
+            return null;
+        }
+        return canvasPoint;
     }
 
     static boolean isCanvasPointInsideViewport(Point point, Rectangle viewport) {
         return point != null && viewport.contains(new Rectangle(point.getX() - 4, point.getY() - 4, 8, 8));
+    }
+
+    static boolean isCanvasPointCoveredByInterface(Point point, List<Rectangle> interfaceBounds) {
+        if (point == null || interfaceBounds == null) {
+            return false;
+        }
+        Rectangle clickArea = new Rectangle(point.getX() - 4, point.getY() - 4, 8, 8);
+        for (Rectangle bounds : interfaceBounds) {
+            if (bounds != null && !bounds.isEmpty() && bounds.intersects(clickArea)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static LocalPoint localPointForWorld(WorldPoint worldPoint) {
@@ -1101,7 +1124,7 @@ final class Rs2WalkerMovement {
                 clicked = clickRouteBackedShortWalk(rawPath, end, retryPlayerLoc,
                         directClickMaxDistance - 1, retryRawAnchorIndex);
             } else {
-                clicked = walkFastCanvas(end);
+                clicked = walkFastCanvasWithAutoRun(end);
             }
             if (!clicked) {
                 return WalkerState.MOVING;

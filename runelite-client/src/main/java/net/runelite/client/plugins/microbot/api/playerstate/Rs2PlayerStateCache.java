@@ -22,6 +22,7 @@ import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 
 import java.util.Arrays;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -189,7 +190,12 @@ public final class Rs2PlayerStateCache {
 
 	private @Varbit int updateVarbitValue(@Varbit int varbitId) {
 		return clientThread.runOnClientThreadOptional(() -> {
-			int value = client.getVarbitValue(varbitId);
+			int value;
+			try {
+				value = client.getVarbitValue(varbitId);
+			} catch (NullPointerException e) {
+				return 0;
+			}
 			// Only cache while logged in: before the initial varp sync completes the client
 			// returns default/stale values, and a wrong entry for a varp the server never
 			// re-sends (zero-valued ones) would stick until the next flush.
@@ -218,8 +224,22 @@ public final class Rs2PlayerStateCache {
 		return value;
 	}
 
+	public Optional<Boolean> isValidVarpId(int varpId) {
+		if (varpId < 0) {
+			return Optional.of(false);
+		}
+		return clientThread.runOnClientThreadOptional(() -> isVarpIdInRange(client.getVarps(), varpId));
+	}
+
+	static boolean isVarpIdInRange(int[] varpValues, int varpId) {
+		return varpValues != null && varpId >= 0 && varpId < varpValues.length;
+	}
+
 	private @Varp int updateVarpValue(@Varp int varpId) {
 		return clientThread.runOnClientThreadOptional(() -> {
+			if (!isVarpIdInRange(client.getVarps(), varpId)) {
+				return 0;
+			}
 			int value = client.getVarpValue(varpId);
 			// Zero is a legitimate value and must be cached too — see updateVarbitValue.
 			if (client.getGameState() == GameState.LOGGED_IN) {
