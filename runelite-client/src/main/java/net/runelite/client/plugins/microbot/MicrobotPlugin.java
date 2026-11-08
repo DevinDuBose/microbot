@@ -23,6 +23,7 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.microbot.accountselector.TerminalLogoutHold;
 import net.runelite.client.plugins.microbot.alerts.ClientAlertReporter;
+import net.runelite.client.plugins.microbot.bans.BanTelemetry;
 import net.runelite.client.plugins.microbot.alerts.DashboardSync;
 import net.runelite.client.plugins.microbot.alerts.DeviceLinkFlow;
 import net.runelite.client.plugins.microbot.diagnostics.BugReportTracker;
@@ -131,6 +132,7 @@ public class MicrobotPlugin extends Plugin
 	private MicrobotTopLevelConfigPanel topLevelConfigPanel;
 
 	private NavigationButton navButton;
+	private InputSelector inputSelector;
 
 	@Provides
 	@Singleton
@@ -164,6 +166,9 @@ public class MicrobotPlugin extends Plugin
 
 	@Inject
 	private ClientAlertReporter clientAlertReporter;
+
+	@Inject
+	private BanTelemetry banTelemetry;
 
 	@Inject
 	private DashboardSync dashboardSync;
@@ -214,6 +219,9 @@ public class MicrobotPlugin extends Plugin
 		flightRecorder.start();
 		eventBus.register(clientAlertReporter);
 		clientAlertReporter.start();
+		eventBus.register(banTelemetry);
+		banTelemetry.start();
+		eventBus.register(dashboardSync);
 		dashboardSync.start();
 		eventBus.register(deviceLinkFlow);
 		eventBus.register(terminalLogoutHold);
@@ -258,7 +266,7 @@ public class MicrobotPlugin extends Plugin
 
 		clientToolbar.addNavigation(navButton);
 
-		new InputSelector(clientToolbar);
+		inputSelector = new InputSelector(clientToolbar);
 		helpMenu.install();
 		bugReportTracker.start();
 		eventBus.register(tour);
@@ -279,6 +287,7 @@ public class MicrobotPlugin extends Plugin
 
 	protected void shutDown()
 	{
+		if (inputSelector != null) inputSelector.shutDown();
 		CanvasInputListener.detach();
 		overlayManager.remove(microbotOverlay);
 		overlayManager.remove(gembagOverlay);
@@ -293,6 +302,9 @@ public class MicrobotPlugin extends Plugin
 		flightRecorder.stop();
 		eventBus.unregister(clientAlertReporter);
 		clientAlertReporter.stop();
+		eventBus.unregister(banTelemetry);
+		banTelemetry.stop();
+		eventBus.unregister(dashboardSync);
 		dashboardSync.stop();
 		eventBus.unregister(deviceLinkFlow);
 		eventBus.unregister(terminalLogoutHold);
@@ -517,30 +529,32 @@ public class MicrobotPlugin extends Plugin
 	@Subscribe(priority = 999)
 	private void onMenuEntryAdded(MenuEntryAdded event)
 	{
-		if (Microbot.targetMenu != null && event.getType() != Microbot.targetMenu.getType().getId())
+		if (ScriptPauseController.isPaused()) return;
+		final MenuEntry targetMenu = Microbot.targetMenu;
+		if (targetMenu != null && event.getType() != targetMenu.getType().getId())
 		{
 			Microbot.getClient().getMenu().setMenuEntries(new MenuEntry[]{});
 		}
 
-		if (Microbot.targetMenu != null)
+		if (targetMenu != null)
 		{
 			MenuEntry entry =
 				Microbot.getClient().getMenu().createMenuEntry(-1)
                     .setItemId(0)
-					.setOption(Microbot.targetMenu.getOption())
-					.setTarget(Microbot.targetMenu.getTarget())
-					.setIdentifier(Microbot.targetMenu.getIdentifier())
-					.setType(Microbot.targetMenu.getType())
-					.setParam0(Microbot.targetMenu.getParam0())
-					.setParam1(Microbot.targetMenu.getParam1())
-                    .setWorldViewId(Microbot.targetMenu.getWorldViewId())
+					.setOption(targetMenu.getOption())
+					.setTarget(targetMenu.getTarget())
+					.setIdentifier(targetMenu.getIdentifier())
+					.setType(targetMenu.getType())
+					.setParam0(targetMenu.getParam0())
+					.setParam1(targetMenu.getParam1())
+                    .setWorldViewId(targetMenu.getWorldViewId())
 					.setForceLeftClick(false);
 
-			if (Microbot.targetMenu.getItemId() > 0)
+			if (targetMenu.getItemId() > 0)
 			{
 				try
 				{
-					Rs2Reflection.setItemId(entry, Microbot.targetMenu.getItemId());
+					Rs2Reflection.setItemId(entry, targetMenu.getItemId());
 				}
 				catch (IllegalAccessException | InvocationTargetException e)
 				{
